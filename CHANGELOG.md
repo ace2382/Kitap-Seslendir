@@ -1,3 +1,11 @@
+# Değişiklikler (v3.1 → v3.2)
+
+- `vitest.config.ts` eklendi, `vite.config.ts` yalnızca `vite`'ten `defineConfig` kullanıyor. Vitest 2.1.x kendi içinde Vite 5 getirir (Vite 6 desteği 2.1.7'de geri alındı); proje Vite 6 olduğu için `tsc -b` adımında `vite.config.ts` içinde iki farklı `Plugin` tipi çakışabilirdi.
+- `NativeTTSPlugin.java`: `notInstalled` özelliği taşıyan (henüz indirilmemiş) Türkçe sesler artık listelenmiyor. Seçilirse motor indirmeyi tetikler ve `speak()` öngörülemez davranırdı. Hiç kurulu Türkçe ses yoksa arayüz zaten "Türkçe ses verisini yükle" yönlendirmesini gösteriyor.
+- Sürüm 1.1.2. Başka dosyaya dokunulmadı.
+
+---
+
 # Değişiklikler (v3 → v3.1)
 
 - `src/pdf.ts`: `task.promise.then(() => page.cleanup())` TypeScript hatası veriyordu (`cleanup()` boolean döndürür, `Promise<void>` bekleniyor) ve `tsc -b` adımında derleme düşüyordu → süslü parantezli gövdeye çevrildi.
