@@ -3,6 +3,7 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { Share } from "@capacitor/share";
 import { UserError } from "./lib/errors.ts";
+import type { SpeechChunk } from "./lib/speech.ts";
 
 export type VoiceInfo = {
   name: string;
@@ -34,10 +35,13 @@ export type AudioInfo = {
 };
 
 type QueueOptions = {
-  chunks: string[];
+  /** Her parça: paragraf metinleri ve ardından beklenecek süre (ms). */
+  plan: SpeechChunk[];
   startIndex: number;
   rate: number;
   pitch: number;
+  /** 0.1–1.0; Android'de medya sesine göre ölçeklenir, onu aşamaz. */
+  volume: number;
   voiceName?: string;
   title: string;
 };
@@ -46,9 +50,11 @@ type ExportOptions = {
   bookId: string;
   title: string;
   signature: string;
-  chunks: string[];
+  plan: SpeechChunk[];
   rate: number;
   pitch: number;
+  /** Ses dosyasında örneklere uygulanan kazanç (0.1–1.0). */
+  volume: number;
   voiceName?: string;
 };
 

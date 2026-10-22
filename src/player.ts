@@ -2,12 +2,14 @@
 // duraklatılsa bile parça zinciri kopmaz. Tarayıcıda (geliştirme) Web Speech ile döngü çalışır.
 import { NativeTTS, isNative } from "./tts.ts";
 import { UserError } from "./lib/errors.ts";
+import type { SpeechChunk } from "./lib/speech.ts";
 
 export type PlayOptions = {
-  chunks: string[];
+  plan: SpeechChunk[];
   startIndex: number;
   rate: number;
   pitch: number;
+  volume: number;
   voiceName?: string;
   title: string;
 };
@@ -44,6 +46,7 @@ function speakWeb(text: string, o: PlayOptions): Promise<void> {
     u.lang = "tr-TR";
     u.rate = o.rate;
     u.pitch = o.pitch;
+    u.volume = o.volume;
     const voices = window.speechSynthesis.getVoices();
     const voice = voices.find((v) => v.name === o.voiceName) ?? voices.find((v) => v.lang.toLowerCase().startsWith("tr"));
     if (voice) u.voice = voice;
@@ -53,8 +56,10 @@ function speakWeb(text: string, o: PlayOptions): Promise<void> {
   });
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
 export async function play(o: PlayOptions, h: PlayHandlers): Promise<void> {
-  if (!o.chunks.length) return;
+  if (!o.plan.length) return;
   handlers = h;
   if (isNative()) {
     await ensureNativeListeners();
@@ -70,11 +75,15 @@ export async function play(o: PlayOptions, h: PlayHandlers): Promise<void> {
   window.speechSynthesis.cancel();
   void (async () => {
     try {
-      for (let i = Math.max(0, o.startIndex); i < o.chunks.length; i++) {
+      for (let i = Math.max(0, o.startIndex); i < o.plan.length; i++) {
         if (session !== webSession) return;
         webIndex = i;
         h.onIndex(i);
-        await speakWeb(o.chunks[i], o);
+        for (const seg of o.plan[i]) {
+          if (session !== webSession) return;
+          await speakWeb(seg.text, o);
+          if (seg.pauseAfterMs > 0 && session === webSession) await sleep(seg.pauseAfterMs);
+        }
       }
       if (session === webSession) h.onDone();
     } catch (e) {

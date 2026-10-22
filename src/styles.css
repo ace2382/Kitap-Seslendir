@@ -30,3 +30,23 @@
 .modal p{font-size:12px;line-height:1.7;color:#6f7168;margin:0 0 14px}
 .modal-input{width:100%;padding:12px;border:1px solid #d7d9cd;border-radius:7px;background:#f8f6f0;font-size:14px}
 .modal-actions{display:flex;justify-content:flex-end;align-items:center;gap:14px;margin-top:16px}
+
+
+/* ---- v3.4 eklemeleri: ses seviyesi, duraklamalar, telaffuz sözlüğü ---- */
+.field-hint{display:block;font-size:10px;line-height:1.6;color:var(--muted);margin-top:8px}
+.range-field.flush{margin-top:0}
+.voice-warning.flush-top{margin:0 0 14px}
+.plain-fieldset{border:0;padding:0;margin:0;min-width:0}
+.plain-fieldset:disabled{opacity:.55}
+.text-input{width:100%;padding:12px;border:1px solid #e0ddd3;border-radius:7px;background:#f8f6f0;color:var(--ink);font-size:13px;outline-color:#839477}
+.check-row{display:flex;align-items:center;gap:10px;margin-top:12px;font-size:12px;color:#575b51}
+.check-row input{width:18px;height:18px;margin:0;accent-color:var(--green);flex:none}
+.dict-actions{display:flex;align-items:center;gap:16px;margin-top:14px}
+.dict-list{list-style:none;margin:18px 0 0;padding:0;border-top:1px solid var(--line)}
+.dict-list li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 4px;border-bottom:1px solid var(--line)}
+.dict-list li.editing{background:#eef0e8}
+.dict-pair{display:grid;gap:3px;min-width:0;font-size:12px;line-height:1.5;color:#575b51;overflow-wrap:anywhere}
+.dict-pair b{font-weight:700;color:var(--ink)}
+.dict-pair small{font-size:10px;color:var(--muted)}
+.dict-row-actions{display:flex;align-items:center;gap:12px;flex:none}
+@media(max-width:540px){.dict-list li{flex-direction:column;align-items:flex-start;gap:6px}}
