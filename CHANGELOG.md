@@ -1,3 +1,10 @@
+# Değişiklikler (v3.2 → v3.3)
+
+- `.github/workflows/build-apk.yml`: `package-lock` artifact'ini yükleyen adımın koşulu `hashFiles('package-lock.json') == ''` idi. Koşul `npm install`'dan sonra değerlendirildiği için (dosya o sırada oluşur) hiçbir zaman doğru olmuyor ve kilit dosyası yüklenmiyordu. Kilidin repoda olup olmadığı artık `npm`'den önce bir adımda (`steps.lock.outputs.present`) kaydediliyor; yoksa özet sayfasına yönerge de yazılıyor.
+- Sürüm 1.1.3. Başka dosyaya dokunulmadı.
+
+---
+
 # Değişiklikler (v3.1 → v3.2)
 
 - `vitest.config.ts` eklendi, `vite.config.ts` yalnızca `vite`'ten `defineConfig` kullanıyor. Vitest 2.1.x kendi içinde Vite 5 getirir (Vite 6 desteği 2.1.7'de geri alındı); proje Vite 6 olduğu için `tsc -b` adımında `vite.config.ts` içinde iki farklı `Plugin` tipi çakışabilirdi.
