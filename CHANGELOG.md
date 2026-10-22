@@ -1,3 +1,35 @@
+# Değişiklikler (v3.3 → v3.4)
+
+Yeni özellikler: **ses seviyesi**, **paragraf/başlık arası duraklama**, **telaffuz sözlüğü**.
+
+## Kullanıcıya görünenler
+- **Ses seviyesi** (%10–%100, varsayılan %100): oynatmada her konuşmaya `KEY_PARAM_VOLUME` olarak iletilir. Telefonun medya sesine göre ölçeklenir, onu aşamaz. Ses dosyasında `synthesizeToFile` seviyeyi uygulamadığı için aynı oran PCM örneklerine kazanç olarak işlenir (taşma kırpılır).
+- **Duraklamalar**: paragraflar arası (0–2 sn, varsayılan 0,4) ve başlığın öncesi + sonrası (0–3 sn, varsayılan 0,8). Oynatmada `playSilentUtterance`, ses dosyasında PCM sessizliği kullanılır. 0 seçilirse eski davranış (paragraflar tek metin olarak okunur, ek sessizlik yok).
+  - Paragrafın ortasına düşen parça sınırında duraklama konmaz.
+  - Sayfa sonunda yarım kalan cümle sonraki sayfada küçük harfle sürüyorsa duraklama konmaz.
+  - Eski sürümde ses dosyasında her parça sonuna sabit 300 ms konuyordu; artık yalnızca paragraf/başlık sınırlarında, ayarlanan süre kadar bekleme var.
+- **Telaffuz sözlüğü**: "yazılışı → okunuşu" kuralları (ör. `TBMM → te be em em`, `Dr. → doktor`). Kural başına "tam kelime" ve "harf duyarlı" seçenekleri, düzenleme, silme ve kuralın okunuşunu **Dinle** düğmesi. Sözlük tüm kitaplar için ortaktır, cihazda (localStorage) saklanır. Yalnızca seslendirilecek metne uygulanır; ekrandaki metin değişmez.
+  - Türkçe harf kuralları doğru işler (`I↔ı`, `İ↔i`); `\b` yalnızca ASCII olduğu için tam kelime denetimi Unicode'a duyarlı yazıldı. `NASA'nın` gibi kesme işaretli ekler eşleşir.
+  - Tek geçişte uygulanır: bir kuralın çıktısı başka kural tarafından yeniden değiştirilmez; aynı konumda uzun anahtar kısa olana üstündür.
+- Ses dosyası önbellek imzası artık seviye, duraklamalar ve sözlük etkisini de içerir. **Önceki sürümle oluşturulmuş ses dosyaları "eskidi" görünür**, yeniden oluşturulmalıdır.
+
+## Teknik
+- `src/lib/text.ts`: parça (`Chunk`) artık `segments` taşır (paragraf metni, başlık mı, paragraf başı mı). Parça metni ve sınırları **değişmedi** (rastgele 400 girdide eski/yeni parçalama birebir karşılaştırıldı); böylece kayıtlı ilerleme ve parça sayıları geçerli kalır.
+- `src/lib/speech.ts` (yeni, saf mantık): duraklama planı, sözlük derleme/uygulama, sözlüğü okuma/doğrulama/güncelleme.
+- Köprü: `chunks: string[]` yerine `plan: { text, pauseAfterMs }[][]` ve `volume`. Web yedeği (tarayıcı) de aynı planı kullanır.
+- `NativeTTSPlugin.java`: kuyruk parça → segment → sessizlik olarak ilerler. Kimlik biçimi `q-<oturum>-<parça>-<sıra>`; `chunkStart` yalnızca parçanın ilk konuşmasında, `queueDone` yalnızca kuyruğun son konuşması bitince bir kez gelir. Kitabın son segmentinden sonra sessizlik eklenmez.
+- Yeni testler: `src/lib/speech.test.ts` ve `text.test.ts` içinde segment testleri (toplam 89 test). `tools/jvm-test/`: Java kuyruğunu ve dışa aktarmayı sahte TTS motoruyla JVM'de deneyen bir araç (`bash tools/jvm-test/run.sh`, JDK 17+).
+- Sürüm 1.2.0.
+
+## Bilinen sınırlar
+- Java değişikliği Android SDK'sı olmadan, **Android API'lerinin sahte karşılıklarına** karşı derlenip denendi (`tools/jvm-test/`). Gerçek `TextToSpeech` motoru ve cihaz davranışı denenmedi; `docs/TEST-PLAN.md` B bölümündeki yeni maddelerle cihazda doğrulanmalı.
+- Ses seviyesi medya sesini aşamaz; daha yüksek ses için telefonun ses tuşu kullanılır.
+- Duraklama süresi, motorun cümle sonlarındaki doğal beklemesinin **üstüne** eklenir; motorlar arası fark olabilir.
+- Sözlük harf eşleştirmesi yapar, okunuş (fonem) üretmez: doğru okunuş için kelimeyi Türkçe okunacağı gibi yazmak gerekir (ör. `Kafka → kafka`, `wifi → vayfay`).
+- Sözlük kuralları yalnızca tek bir paragraf/cümle içinde eşleşir; cümle sonu noktasıyla ayrılan ifadeler (ör. `Dr. Ahmet`) parça sınırına denk gelirse eşleşmeyebilir.
+
+---
+
 # Değişiklikler (v3.2 → v3.3)
 
 - `.github/workflows/build-apk.yml`: `package-lock` artifact'ini yükleyen adımın koşulu `hashFiles('package-lock.json') == ''` idi. Koşul `npm install`'dan sonra değerlendirildiği için (dosya o sırada oluşur) hiçbir zaman doğru olmuyor ve kilit dosyası yüklenmiyordu. Kilidin repoda olup olmadığı artık `npm`'den önce bir adımda (`steps.lock.outputs.present`) kaydediliyor; yoksa özet sayfasına yönerge de yazılıyor.
