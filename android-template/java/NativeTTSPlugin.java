@@ -47,11 +47,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Android yerleşik TextToSpeech motoru köprüsü (çevrimdışı çalışır, bulut TTS yok).
  *
  * - Oynatma kuyruğu bu sınıfta yürür: JS (WebView) arka plana alınsa da parça zinciri kopmaz.
+ * - Her parça (chunk) paragraf segmentlerinden oluşur; segmentler arasındaki duraklama
+ *   playSilentUtterance ile (oynatma) ya da PCM sessizliğiyle (dışa aktarma) uygulanır.
  * - Ses dosyası dışa aktarma: TTS -> WAV (geçici) -> AAC (MediaCodec) -> .m4a. Harici kütüphane yok.
  * - Kaydetme/paylaşma MediaStore üzerinden yapılır (Android 10+ için depolama izni gerekmez).
  */
@@ -62,6 +66,7 @@ public class NativeTTSPlugin extends Plugin {
     private static final int MAX_AHEAD = 3;
     private static final long INIT_TIMEOUT_MS = 6000;
     private static final long SYNTH_TIMEOUT_MS = 180_000;
+    private static final int MAX_PAUSE_MS = 5000;
 
     private static volatile NativeTTSPlugin instance;
 
@@ -80,11 +85,25 @@ public class NativeTTSPlugin extends Plugin {
     private volatile int turkishResult = TextToSpeech.LANG_NOT_SUPPORTED;
 
     // Oynatma kuyruğu durumu ("lock" ile korunur)
-    private List<String> queue = new ArrayList<>();
+    private List<List<Seg>> queue = new ArrayList<>();
     private int nextToEnqueue = 0;
     private int currentIndex = 0;
     private int session = 0;
     private boolean playing = false;
+    private float playVolume = 1f;
+    /** Kuyruktaki son konuşma parçasının kimliği; bu bitince kuyruk tamamlanmış sayılır. */
+    private String finalUtteranceId = null;
+
+    /** Bir paragraf (segment) ve ardından beklenecek süre. */
+    private static final class Seg {
+        final String text;
+        final int pauseMs;
+
+        Seg(String text, int pauseMs) {
+            this.text = text;
+            this.pauseMs = pauseMs;
+        }
+    }
 
     private static final class ExportWait {
         final CountDownLatch latch = new CountDownLatch(1);
@@ -266,7 +285,7 @@ public class NativeTTSPlugin extends Plugin {
         @Override
         public void onStart(String id) {
             int[] p = parsePlayback(id);
-            if (p == null) return;
+            if (p == null || p[2] != 0) return; // parçanın ilk konuşması dışındakiler (paragraflar, sessizlikler) bildirim üretmez
             synchronized (lock) {
                 if (p[0] != session || !playing) return;
                 currentIndex = p[1];
@@ -289,7 +308,7 @@ public class NativeTTSPlugin extends Plugin {
             boolean last;
             synchronized (lock) {
                 if (p[0] != session || !playing) return;
-                last = p[1] >= queue.size() - 1;
+                last = id.equals(finalUtteranceId);
                 if (last) {
                     playing = false;
                     session++;
@@ -332,29 +351,53 @@ public class NativeTTSPlugin extends Plugin {
         }
     }
 
-    /** "q-<oturum>-<indeks>" biçimindeki kimliği çözer; başka kimlikler için null döner. */
+    /**
+     * "q-<oturum>-<parça>-<sıra>" biçimindeki kimliği çözer: {oturum, parça, parça içindeki sıra}.
+     * Başka kimlikler için null döner. Sıra 0 = parçanın ilk konuşması.
+     */
     private static int[] parsePlayback(String id) {
         if (id == null || !id.startsWith("q-")) return null;
         String[] parts = id.split("-");
-        if (parts.length != 3) return null;
+        if (parts.length != 4) return null;
         try {
-            return new int[] { Integer.parseInt(parts[1]), Integer.parseInt(parts[2]) };
+            return new int[] { Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Integer.parseInt(parts[3]) };
         } catch (NumberFormatException e) {
             return null;
         }
     }
 
-    /** Kuyrukta her zaman en fazla MAX_AHEAD parça hazır tutulur. */
+    /**
+     * Kuyrukta her zaman en fazla MAX_AHEAD parça hazır tutulur. Bir parçanın bütün segmentleri
+     * (ve aralarındaki sessizlikler) birlikte kuyruğa eklenir; böylece parça içindeki bekleme
+     * JS'e dönmeden, ekran kilitliyken de doğru işler.
+     */
     private void enqueueMore() {
         boolean failed = false;
         synchronized (lock) {
             while (playing && tts != null && nextToEnqueue < queue.size() && (nextToEnqueue - currentIndex) < MAX_AHEAD) {
-                String id = "q-" + session + "-" + nextToEnqueue;
-                int r = tts.speak(queue.get(nextToEnqueue), TextToSpeech.QUEUE_ADD, new Bundle(), id);
-                if (r == TextToSpeech.ERROR) {
-                    failed = true;
-                    break;
+                List<Seg> segs = queue.get(nextToEnqueue);
+                boolean lastChunk = nextToEnqueue == queue.size() - 1;
+                int n = 0;
+                for (int s = 0; s < segs.size() && !failed; s++) {
+                    Seg seg = segs.get(s);
+                    String id = "q-" + session + "-" + nextToEnqueue + "-" + (n++);
+                    Bundle params = new Bundle();
+                    params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, playVolume);
+                    if (tts.speak(seg.text, TextToSpeech.QUEUE_ADD, params, id) == TextToSpeech.ERROR) {
+                        failed = true;
+                        break;
+                    }
+                    boolean lastSeg = s == segs.size() - 1;
+                    if (lastChunk && lastSeg) {
+                        finalUtteranceId = id;
+                    } else if (seg.pauseMs > 0) {
+                        String silenceId = "q-" + session + "-" + nextToEnqueue + "-" + (n++);
+                        if (tts.playSilentUtterance(seg.pauseMs, TextToSpeech.QUEUE_ADD, silenceId) == TextToSpeech.ERROR) {
+                            failed = true;
+                        }
+                    }
                 }
+                if (failed) break;
                 nextToEnqueue++;
             }
         }
@@ -386,7 +429,7 @@ public class NativeTTSPlugin extends Plugin {
             call.reject("Ses dosyası hazırlanırken seslendirme başlatılamaz. İşlem bitince tekrar dene.");
             return;
         }
-        List<String> list = readChunks(call);
+        List<List<Seg>> list = readPlan(call);
         if (list.isEmpty()) {
             call.reject("Seslendirilecek metin boş.");
             return;
@@ -395,6 +438,7 @@ public class NativeTTSPlugin extends Plugin {
         int start = Math.max(0, Math.min(startBoxed == null ? 0 : startBoxed, list.size() - 1));
         float rate = floatOf(call.getDouble("rate", 1.0), 1f);
         float pitch = floatOf(call.getDouble("pitch", 1.0), 1f);
+        float volume = clampVolume(floatOf(call.getDouble("volume", 1.0), 1f));
         String voiceName = call.getString("voiceName", "");
         String title = call.getString("title", "Kitap");
 
@@ -403,6 +447,8 @@ public class NativeTTSPlugin extends Plugin {
             queue = list;
             currentIndex = start;
             nextToEnqueue = start;
+            playVolume = volume;
+            finalUtteranceId = null;
             playing = true;
         }
         try {
@@ -518,13 +564,14 @@ public class NativeTTSPlugin extends Plugin {
             return;
         }
         final String signature = call.getString("signature", "");
-        final List<String> texts = readChunks(call);
-        if (texts.isEmpty()) {
+        final List<List<Seg>> plan = readPlan(call);
+        if (plan.isEmpty()) {
             call.reject("Dışa aktarılacak metin bulunamadı.");
             return;
         }
         final float rate = floatOf(call.getDouble("rate", 1.0), 1f);
         final float pitch = floatOf(call.getDouble("pitch", 1.0), 1f);
+        final float volume = clampVolume(floatOf(call.getDouble("volume", 1.0), 1f));
         final String voiceName = call.getString("voiceName", "");
         if (!exporting.compareAndSet(false, true)) {
             call.reject("Başka bir ses dosyası hazırlanıyor. Bitmesini bekle.");
@@ -533,15 +580,15 @@ public class NativeTTSPlugin extends Plugin {
         pauseInternal(true); // aynı TTS örneğini kullandığımız için seslendirme durdurulur
         cancelExport = false;
         try {
-            exec.execute(() -> runExport(call, bookId, signature == null ? "" : signature, texts, voiceName, rate, pitch));
+            exec.execute(() -> runExport(call, bookId, signature == null ? "" : signature, plan, voiceName, rate, pitch, volume));
         } catch (RuntimeException e) {
             exporting.set(false);
             call.reject("Ses dosyası işlemi başlatılamadı.");
         }
     }
 
-    private void runExport(PluginCall call, String bookId, String signature, List<String> texts,
-                           String voiceName, float rate, float pitch) {
+    private void runExport(PluginCall call, String bookId, String signature, List<List<Seg>> plan,
+                           String voiceName, float rate, float pitch, float volume) {
         File dir = audioDir();
         File out = audioFile(bookId);
         File part = new File(dir, bookId + ".m4a.part");
@@ -560,7 +607,7 @@ public class NativeTTSPlugin extends Plugin {
             }
 
             long chars = 0;
-            for (String t : texts) chars += t.length();
+            for (List<Seg> segs : plan) for (Seg seg : segs) chars += seg.text.length();
             long needed = chars * 600L + 24L * 1024 * 1024; // ~64 kbps AAC + geçici WAV payı
             if (dir.getUsableSpace() < needed) {
                 throw new IOException("Cihazda yeterli boş alan yok. Ses dosyası için yaklaşık "
@@ -574,38 +621,46 @@ public class NativeTTSPlugin extends Plugin {
 
             applyVoice(voiceName, rate, pitch);
 
-            int total = texts.size();
+            int total = plan.size();
             int sampleRate = 0;
             int channels = 0;
             for (int i = 0; i < total; i++) {
                 if (cancelExport) throw new Cancelled();
-                String text = texts.get(i);
-                if (text.trim().isEmpty()) continue;
+                List<Seg> segs = plan.get(i);
+                for (int s = 0; s < segs.size(); s++) {
+                    if (cancelExport) throw new Cancelled();
+                    Seg seg = segs.get(s);
+                    if (seg.text.trim().isEmpty()) continue;
 
-                synthesize(text, wav, i);
-                WavReader.Info wi = WavReader.parse(wav);
-                if (enc == null) {
-                    sampleRate = wi.sampleRate;
-                    channels = wi.channels;
-                    enc = new AacEncoder(part, sampleRate, channels);
-                } else if (wi.sampleRate != sampleRate || wi.channels != channels) {
-                    throw new IOException("Ses motoru parçalar arasında örnekleme hızını değiştirdi.");
-                }
-
-                try (RandomAccessFile raf = new RandomAccessFile(wav, "r")) {
-                    raf.seek(wi.dataOffset);
-                    long remaining = wi.dataLength;
-                    byte[] buf = new byte[16384];
-                    while (remaining > 0) {
-                        if (cancelExport) throw new Cancelled();
-                        int n = (int) Math.min(buf.length, remaining);
-                        raf.readFully(buf, 0, n);
-                        enc.write(buf, 0, n);
-                        remaining -= n;
+                    synthesize(seg.text, wav, i);
+                    WavReader.Info wi = WavReader.parse(wav);
+                    if (enc == null) {
+                        sampleRate = wi.sampleRate;
+                        channels = wi.channels;
+                        enc = new AacEncoder(part, sampleRate, channels);
+                    } else if (wi.sampleRate != sampleRate || wi.channels != channels) {
+                        throw new IOException("Ses motoru parçalar arasında örnekleme hızını değiştirdi.");
                     }
+
+                    try (RandomAccessFile raf = new RandomAccessFile(wav, "r")) {
+                        raf.seek(wi.dataOffset);
+                        long remaining = wi.dataLength;
+                        byte[] buf = new byte[16384];
+                        while (remaining > 0) {
+                            if (cancelExport) throw new Cancelled();
+                            int n = (int) Math.min(buf.length, remaining);
+                            raf.readFully(buf, 0, n);
+                            // synthesizeToFile ses seviyesini uygulamaz; seviye PCM örneklerine kazanç olarak işlenir.
+                            if (volume < 0.999f) applyGain(buf, n, volume);
+                            enc.write(buf, 0, n);
+                            remaining -= n;
+                        }
+                    }
+                    deleteQuietly(wav);
+
+                    boolean lastOfBook = i == total - 1 && s == segs.size() - 1;
+                    if (!lastOfBook && seg.pauseMs > 0) enc.writeSilence(seg.pauseMs);
                 }
-                if (i < total - 1) enc.writeSilence(300);
-                deleteQuietly(wav);
 
                 JSObject progress = new JSObject();
                 progress.put("done", i + 1);
@@ -829,15 +884,43 @@ public class NativeTTSPlugin extends Plugin {
         }
     }
 
-    private static List<String> readChunks(PluginCall call) {
-        List<String> list = new ArrayList<>();
-        JSArray arr = call.getArray("chunks");
-        if (arr == null) return list;
+    /**
+     * JS'ten gelen planı okur: parça = [ { text, pauseAfterMs }, ... ].
+     * Boş segmentler atlanır; hiç segmenti kalmayan parça kuyruğu bozmasın diye tek bir "." olur.
+     */
+    private static List<List<Seg>> readPlan(PluginCall call) {
+        List<List<Seg>> plan = new ArrayList<>();
+        JSArray arr = call.getArray("plan");
+        if (arr == null) return plan;
         for (int i = 0; i < arr.length(); i++) {
-            String s = arr.optString(i, "");
-            list.add(s.trim().isEmpty() ? "." : s); // boş parça kuyruğu bozmasın
+            List<Seg> segs = new ArrayList<>();
+            JSONArray chunk = arr.optJSONArray(i);
+            if (chunk != null) {
+                for (int j = 0; j < chunk.length(); j++) {
+                    JSONObject o = chunk.optJSONObject(j);
+                    if (o == null) continue;
+                    String text = o.optString("text", "");
+                    if (text.trim().isEmpty()) continue;
+                    int pause = Math.max(0, Math.min(MAX_PAUSE_MS, o.optInt("pauseAfterMs", 0)));
+                    segs.add(new Seg(text, pause));
+                }
+            }
+            if (segs.isEmpty()) segs.add(new Seg(".", 0));
+            plan.add(segs);
         }
-        return list;
+        return plan;
+    }
+
+    /** 16 bit little-endian PCM örneklerini kazançla çarpar; taşmayı kırparak önler. */
+    private static void applyGain(byte[] buf, int length, float gain) {
+        for (int i = 0; i + 1 < length; i += 2) {
+            int sample = (short) ((buf[i] & 0xFF) | (buf[i + 1] << 8));
+            int v = Math.round(sample * gain);
+            if (v > Short.MAX_VALUE) v = Short.MAX_VALUE;
+            else if (v < Short.MIN_VALUE) v = Short.MIN_VALUE;
+            buf[i] = (byte) (v & 0xFF);
+            buf[i + 1] = (byte) ((v >> 8) & 0xFF);
+        }
     }
 
     /** Dosya yolu çıkışını (path traversal) engellemek için kimlik güvenli karakterlere indirgenir. */
@@ -858,5 +941,9 @@ public class NativeTTSPlugin extends Plugin {
 
     private static float clamp(float v) {
         return Math.max(0.5f, Math.min(2.0f, v));
+    }
+
+    private static float clampVolume(float v) {
+        return Math.max(0.1f, Math.min(1.0f, v));
     }
 }
