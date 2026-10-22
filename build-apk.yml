@@ -1,0 +1,91 @@
+name: Build Android debug APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # package-lock.json yoksa npm önbelleği kapalı kalır (setup-node aksi halde hata verir).
+          cache: ${{ hashFiles('package-lock.json') != '' && 'npm' || '' }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Kilit dosyasının repoda olup olmadığı npm'den ÖNCE kaydedilir. (Sonradan hashFiles ile
+      # sorulursa, `npm install` dosyayı o sırada ürettiği için yanıt hep "var" olur.)
+      - name: package-lock.json repoda var mı?
+        id: lock
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bağımlılıkları kur
+        run: |
+          if [ "${{ steps.lock.outputs.present }}" = "true" ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "::warning::package-lock.json repoda yok. Derleme deterministik olmayabilir; Actions çıktısındaki 'package-lock' dosyasını indirip repoya ekleyin."
+            npm install --no-audit --no-fund
+            {
+              echo "### package-lock.json repoda yok"
+              echo "Bu çalışmanın **Artifacts** bölümündeki \`package-lock\` dosyasını indirip repo köküne ekleyin (Add file → Upload files)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Üretilen package-lock.json'ı sakla (repoda yoksa)
+        if: ${{ steps.lock.outputs.present == 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-lock
+          path: package-lock.json
+          if-no-files-found: error
+
+      - name: Birim testleri
+        run: npm test
+
+      - name: Tip denetimi ve web derlemesi
+        run: npm run build
+
+      - name: Android projesini hazırla (eklenti, manifest, ikonlar)
+        run: npm run android:prepare
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Debug APK derle
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: APK özeti
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          ls -l "$APK"
+          sha256sum "$APK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kitap-seslendir-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
