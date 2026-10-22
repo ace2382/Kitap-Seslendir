@@ -122,3 +122,31 @@ describe("yardımcılar", () => {
     expect(fnv1a("abc")).not.toBe(fnv1a("abd"));
   });
 });
+
+describe("buildChunks: segmentler (duraklama planı için)", () => {
+  it("segmentlerin \"\\n\" ile birleşimi parça metnidir; başlık işaretlenir", () => {
+    const { chunks } = buildChunks([
+      { page: 1, paragraphs: [{ text: "BÖLÜM 1", heading: true }, { text: "Bir varmış." }, { text: "Bir yokmuş." }] }
+    ]);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].segments).toEqual([
+      { text: "BÖLÜM 1", heading: true, newParagraph: true },
+      { text: "Bir varmış.", heading: false, newParagraph: true },
+      { text: "Bir yokmuş.", heading: false, newParagraph: true }
+    ]);
+    expect(chunks[0].segments.map((s) => s.text).join("\n")).toBe(chunks[0].text);
+  });
+  it("parçalara bölünen uzun paragrafın devamı newParagraph=false olur", () => {
+    const long = Array.from({ length: 30 }, () => "Bu bir deneme cümlesidir.").join(" ");
+    const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: long }] }], 120);
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(chunks[0].segments[0].newParagraph).toBe(true);
+    for (const c of chunks.slice(1)) expect(c.segments[0].newParagraph).toBe(false);
+    for (const c of chunks) expect(c.segments).toHaveLength(1);
+  });
+  it("parça sınırları ve metinleri segment bilgisinden bağımsız olarak eskisiyle aynıdır", () => {
+    const text = "Birinci paragraf burada biter.\nİkinci paragraf daha uzundur, bir iki üç dört. Üçüncü cümle de var!\nSon satır?";
+    const viaChunks = buildChunks([{ page: 1, paragraphs: text.split("\n").map((t) => ({ text: t })) }], 40).chunks.map((c) => c.text);
+    expect(viaChunks).toEqual(splitForTts(text, 40));
+  });
+});

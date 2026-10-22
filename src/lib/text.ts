@@ -3,7 +3,13 @@
 
 export type Paragraph = { text: string; heading?: boolean };
 export type PageContent = { page: number; paragraphs: Paragraph[] };
-export type Chunk = { text: string; page: number; section: number };
+/**
+ * Bir parçanın içindeki paragraf (ya da uzun bir paragrafın o parçaya düşen kısmı).
+ * `newParagraph` yanlışsa bu segment, önceki parçada başlayan paragrafın devamıdır.
+ */
+export type Segment = { text: string; heading: boolean; newParagraph: boolean };
+/** `text` = segmentlerin "\n" ile birleşimi (eski davranışla birebir aynı); `segments` duraklama planı içindir. */
+export type Chunk = { text: string; page: number; section: number; segments: Segment[] };
 export type Section = { title: string; page: number; chunk: number };
 
 /** Oynatma parçası boyutu. Küçük parça = duraklatınca en fazla ~1 dk geri sarar. */
@@ -91,45 +97,67 @@ function hardSplit(sentence: string, max: number): string[] {
   return out;
 }
 
+type Unit = { text: string; newParagraph: boolean; heading: boolean };
+
+function clampMax(maxChars: number): number {
+  return Math.max(10, Math.min(maxChars, MAX_TTS_CHARS));
+}
+
+/** Paragrafları cümle (gerekirse daha küçük) birimlerine ayırır; her birim paragraf başı/başlık bilgisini taşır. */
+function toUnits(paragraphs: Paragraph[], max: number): Unit[] {
+  const units: Unit[] = [];
+  for (const paragraph of paragraphs) {
+    for (const line of paragraph.text.replace(/\r\n?/g, "\n").split(/\n+/)) {
+      const p = line.trim();
+      if (!p) continue;
+      let first = true;
+      for (const sentence of splitSentences(p)) {
+        for (const piece of sentence.length > max ? hardSplit(sentence, max) : [sentence]) {
+          units.push({ text: piece, newParagraph: first, heading: !!paragraph.heading });
+          first = false;
+        }
+      }
+    }
+  }
+  return units;
+}
+
+/** Birimleri `max` karakteri aşmayan parçalara paketler. Parça metni ve sınırları eskisiyle aynıdır. */
+function packUnits(units: Unit[], max: number): { text: string; segments: Segment[] }[] {
+  const out: { text: string; segments: Segment[] }[] = [];
+  let text = "";
+  let segments: Segment[] = [];
+  const seg = (u: Unit): Segment => ({ text: u.text, heading: u.heading, newParagraph: u.newParagraph });
+  for (const unit of units) {
+    if (!text) {
+      text = unit.text;
+      segments = [seg(unit)];
+      continue;
+    }
+    const sep = unit.newParagraph ? "\n" : " ";
+    if (text.length + sep.length + unit.text.length > max) {
+      out.push({ text, segments });
+      text = unit.text;
+      segments = [seg(unit)];
+    } else {
+      text += sep + unit.text;
+      if (unit.newParagraph) segments.push(seg(unit));
+      else segments[segments.length - 1].text += " " + unit.text;
+    }
+  }
+  if (text) out.push({ text, segments });
+  return out;
+}
+
 /**
  * Metni TTS için parçalara böler. Her parça en fazla `maxChars` karakterdir,
  * cümle/paragraf sınırlarında kesilmeye çalışılır, hiçbir metin kaybolmaz.
  */
 export function splitForTts(text: string, maxChars = CHUNK_CHARS): string[] {
-  const max = Math.max(10, Math.min(maxChars, MAX_TTS_CHARS));
+  const max = clampMax(maxChars);
   const normalized = text.replace(/\r\n?/g, "\n").trim();
   if (!normalized) return [];
-
-  const units: { text: string; newParagraph: boolean }[] = [];
-  for (const paragraph of normalized.split(/\n+/)) {
-    const p = paragraph.trim();
-    if (!p) continue;
-    let first = true;
-    for (const sentence of splitSentences(p)) {
-      for (const piece of sentence.length > max ? hardSplit(sentence, max) : [sentence]) {
-        units.push({ text: piece, newParagraph: first });
-        first = false;
-      }
-    }
-  }
-
-  const chunks: string[] = [];
-  let current = "";
-  for (const unit of units) {
-    if (!current) {
-      current = unit.text;
-      continue;
-    }
-    const sep = unit.newParagraph ? "\n" : " ";
-    if (current.length + sep.length + unit.text.length > max) {
-      chunks.push(current);
-      current = unit.text;
-    } else {
-      current += sep + unit.text;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks;
+  return packUnits(toUnits([{ text: normalized }], max), max).map((c) => c.text);
 }
 
 /**
@@ -146,11 +174,12 @@ export function buildChunks(
   let currentSection = -1;
 
   for (const page of pages) {
-    let segment: string[] = [];
+    const max = clampMax(maxChars);
+    let segment: Paragraph[] = [];
     const flush = () => {
       if (!segment.length) return;
-      for (const text of splitForTts(segment.join("\n"), maxChars)) {
-        chunks.push({ text, page: page.page, section: currentSection });
+      for (const c of packUnits(toUnits(segment, max), max)) {
+        chunks.push({ text: c.text, page: page.page, section: currentSection, segments: c.segments });
       }
       segment = [];
     };
@@ -162,7 +191,7 @@ export function buildChunks(
         sections.push({ title: text.slice(0, 80), page: page.page, chunk: chunks.length });
         currentSection = sections.length - 1;
       }
-      segment.push(text);
+      segment.push({ text, heading: paragraph.heading });
     }
     flush();
   }
