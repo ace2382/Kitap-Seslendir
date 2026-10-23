@@ -27,10 +27,18 @@ export type PauseSettings = {
   headingBeforeMs: number;
   /** Bir başlıktan sonra (bölümün ilk paragrafına geçmeden önce). */
   headingAfterMs: number;
-  /** Cümleler arası (. ! ? …). Bir cümlenin sonu ile sonrakinin başı aynı boşluktur. */
-  sentenceMs: number;
-  /** Cümle içinde virgül, noktalı virgül ve iki noktadan sonra. */
+  /** Nokta (.) sonrası. Bir cümlenin sonu ile sonrakinin başı aynı boşluktur. */
+  periodMs: number;
+  /** Soru (?) ve ünlem (!) sonrası. */
+  questionMs: number;
+  /** Üç nokta (… ya da ...) sonrası; sonraki sözcük küçük harfle başlasa da uygulanır. */
+  ellipsisMs: number;
+  /** Virgül (,) sonrası. */
   commaMs: number;
+  /** Noktalı virgül (;) sonrası. */
+  semicolonMs: number;
+  /** İki nokta (:) sonrası. */
+  colonMs: number;
 };
 export type PlanSettings = PauseSettings & {
   /** Tamamı büyük harfli başlık/kelime dizilerini normal harfe çevirir (motor harf harf heceleyemesin). */
@@ -237,10 +245,24 @@ function startsNewSentence(text: string, termStart: number, termEnd: number, nex
   return true;
 }
 
-type Break = { at: number; kind: "sentence" | "clause" };
+type Break = { at: number; ms: number };
+type PunctuationPauses = Pick<PauseSettings, "periodMs" | "questionMs" | "ellipsisMs" | "commaMs" | "semicolonMs" | "colonMs">;
 
-/** Metindeki duraklama noktaları: `at` = parçanın bittiği konum (noktalama ve kapanış tırnağı dahil). */
-function findBreaks(text: string, sentences: boolean, clauses: boolean): Break[] {
+const punctuationOff = (p: PunctuationPauses) =>
+  p.periodMs <= 0 && p.questionMs <= 0 && p.ellipsisMs <= 0 && p.commaMs <= 0 && p.semicolonMs <= 0 && p.colonMs <= 0;
+
+/** Noktalama dizisinin türü: üç nokta (… / ..), soru-ünlem (? !) ya da tek nokta. */
+function terminatorKind(run: string): "ellipsisMs" | "questionMs" | "periodMs" {
+  if (run.includes("…") || run.includes("..")) return "ellipsisMs";
+  if (run.includes("?") || run.includes("!")) return "questionMs";
+  return "periodMs";
+}
+
+/**
+ * Metindeki duraklama noktaları: `at` = parçanın bittiği konum (noktalama ve kapanış tırnağı dahil), `ms` = bekleme.
+ * Süresi 0 olan noktalama türü hiç bölme noktası üretmez.
+ */
+function findBreaks(text: string, p: PunctuationPauses): Break[] {
   const breaks: Break[] = [];
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -248,29 +270,34 @@ function findBreaks(text: string, sentences: boolean, clauses: boolean): Break[]
       let j = i + 1;
       while (j < text.length && isTerminator(text[j])) j++;
       const termEnd = j;
+      const kind = terminatorKind(text.slice(i, termEnd));
       while (j < text.length && isCloser(text[j])) j++;
-      if (sentences && j < text.length && isSpace(text[j])) {
+      if (p[kind] > 0 && j < text.length && isSpace(text[j])) {
         let k = j;
         while (k < text.length && isSpace(text[k])) k++;
-        if (k < text.length && startsNewSentence(text, i, termEnd, k)) breaks.push({ at: j, kind: "sentence" });
+        // Üç nokta bir cümle sonu olmak zorunda değildir ("Ben... bilmiyorum."): sonraki harf küçük olsa da bekler.
+        if (k < text.length && (kind === "ellipsisMs" || startsNewSentence(text, i, termEnd, k))) {
+          breaks.push({ at: j, ms: p[kind] });
+        }
       }
       i = j - 1;
-    } else if (clauses && (c === "," || c === ";" || c === ":")) {
+    } else if (c === "," || c === ";" || c === ":") {
+      const ms = c === "," ? p.commaMs : c === ";" ? p.semicolonMs : p.colonMs;
       // "1,5" gibi sayılar ve "10:30" gibi saatler boşluksuz olduğu için bölünmez.
-      if (i + 1 < text.length && isSpace(text[i + 1]) && text.slice(i + 1).trim()) breaks.push({ at: i + 1, kind: "clause" });
+      if (ms > 0 && i + 1 < text.length && isSpace(text[i + 1]) && text.slice(i + 1).trim()) breaks.push({ at: i + 1, ms });
     }
   }
   return breaks;
 }
 
-/** Bir paragrafı cümle/virgül parçalarına böler; son parçanın `pause` değeri -1'dir (çağıran belirler). */
-function splitPieces(text: string, sentenceMs: number, commaMs: number): { text: string; pause: number }[] {
-  if (sentenceMs <= 0 && commaMs <= 0) return [{ text, pause: -1 }];
+/** Bir paragrafı noktalama parçalarına böler; son parçanın `pause` değeri -1'dir (çağıran belirler). */
+function splitPieces(text: string, p: PunctuationPauses): { text: string; pause: number }[] {
+  if (punctuationOff(p)) return [{ text, pause: -1 }];
   const pieces: { text: string; pause: number }[] = [];
   let start = 0;
-  for (const b of findBreaks(text, sentenceMs > 0, commaMs > 0)) {
+  for (const b of findBreaks(text, p)) {
     const piece = text.slice(start, b.at).trim();
-    if (piece) pieces.push({ text: piece, pause: b.kind === "sentence" ? sentenceMs : commaMs });
+    if (piece) pieces.push({ text: piece, pause: b.ms });
     start = b.at;
   }
   const last = text.slice(start).trim();
@@ -279,9 +306,18 @@ function splitPieces(text: string, sentenceMs: number, commaMs: number): { text:
   return pieces;
 }
 
+/** Bir parçanın sonundaki noktalamaya göre bekleme (paragraf ortasındaki parça sınırı için); noktalama yoksa 0. */
+function terminalPause(text: string, p: PunctuationPauses): number {
+  let end = text.length;
+  while (end > 0 && (isCloser(text[end - 1]) || isSpace(text[end - 1]))) end--;
+  let start = end;
+  while (start > 0 && isTerminator(text[start - 1])) start--;
+  return start === end ? 0 : p[terminatorKind(text.slice(start, end))];
+}
+
 function boundaryPause(a: Segment, aPage: number, b: Segment, bPage: number, s: PauseSettings): number {
-  // Aynı paragrafın devamı: parça sınırları cümle sınırlarına denk gelir.
-  if (!b.newParagraph) return s.sentenceMs;
+  // Aynı paragrafın devamı: parça sınırları cümle sınırlarına denk gelir; bekleme cümlenin noktalamasına bağlıdır.
+  if (!b.newParagraph) return terminalPause(a.text, s);
   if (aPage !== bPage && !a.heading && !b.heading && continuesAcrossPages(a.text, b.text)) return 0;
   if (a.heading) return s.headingAfterMs;
   if (b.heading) return s.headingBeforeMs;
@@ -293,7 +329,8 @@ const clampMs = (ms: number) => (Number.isFinite(ms) ? Math.max(0, Math.min(MAX_
 /**
  * Parçalardan seslendirme planını üretir.
  * - Paragraflar arası `paragraphMs`; başlıktan önce `headingBeforeMs`, sonra `headingAfterMs`.
- * - `sentenceMs` / `commaMs` > 0 ise paragraflar cümlelere / virgül parçalarına bölünür ve aralarına bekleme konur.
+ * - Nokta, soru/ünlem, üç nokta, virgül, noktalı virgül ve iki nokta için ayrı süreler: süresi > 0 olan noktalamada
+ *   paragraf bölünür ve araya bekleme konur. Üç nokta, sonraki sözcük küçük harfle başlasa da bekler.
  *   Kısaltma ("Dr. Ahmet"), sıra sayısı ("19. yüzyıl"), baş harf ("M. Kemal") ve küçük harfle süren konuşma
  *   etiketleri ("Gel! dedi.") cümle sonu sayılmaz. Başlıklar bölünmez.
  * - Duraklaması 0 olan ardışık parçalar tek metin olarak birleştirilir (paragraflar "\n", cümleler " " ile);
@@ -313,8 +350,12 @@ export function buildSpeechPlan(
     paragraphMs: clampMs(settings.paragraphMs),
     headingBeforeMs: clampMs(settings.headingBeforeMs),
     headingAfterMs: clampMs(settings.headingAfterMs),
-    sentenceMs: clampMs(settings.sentenceMs),
-    commaMs: clampMs(settings.commaMs)
+    periodMs: clampMs(settings.periodMs),
+    questionMs: clampMs(settings.questionMs),
+    ellipsisMs: clampMs(settings.ellipsisMs),
+    commaMs: clampMs(settings.commaMs),
+    semicolonMs: clampMs(settings.semicolonMs),
+    colonMs: clampMs(settings.colonMs)
   };
   const plan: SpeechChunk[] = [];
 
@@ -350,7 +391,7 @@ export function buildSpeechPlan(
         continue;
       }
 
-      const pieces = seg.heading ? [{ text, pause: -1 }] : splitPieces(text, pauses.sentenceMs, pauses.commaMs);
+      const pieces = seg.heading ? [{ text, pause: -1 }] : splitPieces(text, pauses);
       pieces.forEach((piece, n) => push(piece.text, piece.pause < 0 ? pause : piece.pause, n === 0 ? "\n" : " "));
     }
 

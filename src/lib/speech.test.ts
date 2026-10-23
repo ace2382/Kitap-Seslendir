@@ -21,14 +21,25 @@ const entry = (from: string, to: string, extra: Partial<Pronunciation> = {}): Pr
   ...extra
 });
 
-/** Test kısayolu: paragraf ve başlık süreleri; cümle/virgül duraklaması varsayılan kapalı (eski davranış). */
-const S = (paragraphMs: number, headingMs: number, extra: Partial<PauseSettings> = {}): PauseSettings => ({
+/**
+ * Test kısayolu: paragraf ve başlık süreleri. Noktalama süreleri varsayılan kapalı (eski davranış);
+ * `sentenceMs` nokta + soru/ünlem + üç nokta'yı, `commaMs` virgül + noktalı virgül + iki noktayı birlikte ayarlar.
+ */
+const S = (
+  paragraphMs: number,
+  headingMs: number,
+  { sentenceMs = 0, commaMs = 0, ...rest }: Partial<PauseSettings> & { sentenceMs?: number } = {}
+): PauseSettings => ({
   paragraphMs,
   headingBeforeMs: headingMs,
   headingAfterMs: headingMs,
-  sentenceMs: 0,
-  commaMs: 0,
-  ...extra
+  periodMs: sentenceMs,
+  questionMs: sentenceMs,
+  ellipsisMs: sentenceMs,
+  commaMs,
+  semicolonMs: commaMs,
+  colonMs: commaMs,
+  ...rest
 });
 const P = S(400, 900);
 
@@ -380,5 +391,80 @@ describe("buildSpeechPlan: cümle ve virgül duraklamaları", () => {
       const out = flat(planOf(text, S(300, 300, { sentenceMs: 200, commaMs: 100 }))).map((x) => x[0]).join(" ");
       expect(out.replace(/\s+/g, " ")).toBe(text.replace(/\s+/g, " ").trim());
     }
+  });
+});
+
+describe("buildSpeechPlan: her noktalama için ayrı süre", () => {
+  const TEXT = "Bir. İki! Üç? Dört... Beş; altı: yedi, sekiz.";
+  const only = (patch: Partial<PauseSettings>) => flat(planOf(TEXT, S(0, 0, patch)));
+
+  it("yalnızca nokta", () => {
+    expect(only({ periodMs: 100 })).toEqual([["Bir.", 100], ["İki! Üç? Dört... Beş; altı: yedi, sekiz.", 0]]);
+  });
+  it("yalnızca soru ve ünlem", () => {
+    expect(only({ questionMs: 100 })).toEqual([["Bir. İki!", 100], ["Üç?", 100], ["Dört... Beş; altı: yedi, sekiz.", 0]]);
+  });
+  it("yalnızca üç nokta", () => {
+    expect(only({ ellipsisMs: 100 })).toEqual([["Bir. İki! Üç? Dört...", 100], ["Beş; altı: yedi, sekiz.", 0]]);
+  });
+  it("yalnızca noktalı virgül", () => {
+    expect(only({ semicolonMs: 100 })).toEqual([["Bir. İki! Üç? Dört... Beş;", 100], ["altı: yedi, sekiz.", 0]]);
+  });
+  it("yalnızca iki nokta", () => {
+    expect(only({ colonMs: 100 })).toEqual([["Bir. İki! Üç? Dört... Beş; altı:", 100], ["yedi, sekiz.", 0]]);
+  });
+  it("yalnızca virgül", () => {
+    // `S` kısayolunda commaMs üç işareti birden ayarladığı için burada yalnızca virgül açıkça yazılır.
+    const commaOnly: PauseSettings = { ...S(0, 0), commaMs: 100 };
+    expect(flat(planOf(TEXT, commaOnly))).toEqual([["Bir. İki! Üç? Dört... Beş; altı: yedi,", 100], ["sekiz.", 0]]);
+  });
+  it("hepsi farklı süreyle birlikte", () => {
+    const all = only({ periodMs: 10, questionMs: 20, ellipsisMs: 30, commaMs: 40, semicolonMs: 50, colonMs: 60 });
+    expect(all).toEqual([
+      ["Bir.", 10],
+      ["İki!", 20],
+      ["Üç?", 20],
+      ["Dört...", 30],
+      ["Beş;", 50],
+      ["altı:", 60],
+      ["yedi,", 40],
+      ["sekiz.", 0]
+    ]);
+  });
+  it("üç nokta sonrası küçük harf gelse de bekler (… ve ... ikisi de)", () => {
+    expect(flat(planOf("Ben... bilmiyorum.", S(0, 0, { ellipsisMs: 100 })))).toEqual([["Ben...", 100], ["bilmiyorum.", 0]]);
+    expect(flat(planOf("Ben… bilmiyorum.", S(0, 0, { ellipsisMs: 100 })))).toEqual([["Ben…", 100], ["bilmiyorum.", 0]]);
+  });
+  it("nokta ve soru, küçük harfle süren cümlede bekletmez; üç nokta bekletir", () => {
+    expect(flat(planOf("Neden? dedi. Ben... bilmem.", S(0, 0, { periodMs: 100, questionMs: 100 })))).toEqual([["Neden? dedi.", 100], ["Ben... bilmem.", 0]]);
+  });
+  it("üç nokta kapanış tırnağıyla birlikte kalır", () => {
+    expect(flat(planOf('"Belki..." dedi.', S(0, 0, { ellipsisMs: 100 })))).toEqual([['"Belki..."', 100], ["dedi.", 0]]);
+  });
+  it("paragraf sonundaki üç nokta paragraf süresini alır", () => {
+    const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: "Belki… yok." }, { text: "Sonra… sustu…" }, { text: "Son." }] }]);
+    expect(flat(buildSpeechPlan(chunks, S(700, 0, { ellipsisMs: 100 })))).toEqual([
+      ["Belki…", 100],
+      ["yok.", 700],
+      ["Sonra…", 100],
+      ["sustu…", 700],
+      ["Son.", 0]
+    ]);
+  });
+  it("parça sınırı, önceki cümlenin noktalamasına göre bekler; noktalama yoksa beklemez", () => {
+    const mk = (end: string) => Array.from({ length: 12 }, (_, i) => `Cümle ${i} oldukça uzun bir cümle olsun diye uzatıldı${end}`).join(" ");
+    const lastOf = (c: ReturnType<typeof planOf>[number]) => c[c.length - 1].pauseAfterMs;
+    const settings = S(600, 900, { periodMs: 11, questionMs: 22, ellipsisMs: 33 });
+    for (const [end, ms] of [[".", 11], ["?", 22], ["!", 22], ["…", 33]] as const) {
+      const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: mk(end) }] }], 200);
+      const plan = buildSpeechPlan(chunks, settings);
+      expect(plan.length).toBeGreaterThan(2);
+      for (let i = 0; i < plan.length - 1; i++) expect(lastOf(plan[i])).toBe(ms);
+    }
+    // tek ve çok uzun, noktalamasız cümle: sert kesilen parçalar arasında bekleme yok
+    const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: "kelime ".repeat(120).trim() + "." }] }], 200);
+    const plan = buildSpeechPlan(chunks, settings);
+    expect(plan.length).toBeGreaterThan(2);
+    for (let i = 0; i < plan.length - 1; i++) expect(lastOf(plan[i])).toBe(0);
   });
 });
