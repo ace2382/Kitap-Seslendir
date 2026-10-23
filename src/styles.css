@@ -57,3 +57,9 @@
 .dict-search{margin-top:8px}
 .dict-empty{margin:12px 0 0;font-size:12px;line-height:1.7;color:#6f7168}
 .dict-modal .dict-list{margin-top:10px}
+.field-hint.flush-top{margin-top:0}
+.dialog-lead{margin:0 0 14px;font-size:12px;line-height:1.7;color:#6f7168}
+.dialog-group{margin:0 0 4px}
+.dialog-group+.dialog-group{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+.dialog-group h4{margin:0 0 14px;font:500 15px var(--serif);color:var(--ink)}
+.dict-foot{flex:none;display:flex;align-items:center;gap:16px;padding:12px 22px 14px;border-top:1px solid var(--line);background:#fbf9f4}

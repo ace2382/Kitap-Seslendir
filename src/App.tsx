@@ -3,6 +3,8 @@ import { Capacitor } from "@capacitor/core";
 import { Share } from "@capacitor/share";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import PasswordDialog from "./components/PasswordDialog.tsx";
+import PauseDialog from "./components/PauseDialog.tsx";
+import type { PauseField } from "./components/PauseDialog.tsx";
 import PronunciationDialog from "./components/PronunciationDialog.tsx";
 import PdfPageView from "./components/PdfPageView.tsx";
 import { UserError, describeError } from "./lib/errors.ts";
@@ -53,18 +55,16 @@ function readNumberPref(key: string, fallback: number, lo: number, hi: number): 
   const n = Number.parseFloat(readPref(key, ""));
   return Number.isFinite(n) ? clamp(n, lo, hi) : fallback;
 }
-const seconds = (n: number) => (n <= 0 ? "Yok" : `${n.toFixed(2).replace(/0$/, "").replace(".", ",")} sn`);
-
-/** "Duraklamaları dene" örneği: başlık, virgül/noktalı virgül/iki nokta, cümleler ve iki paragraf içerir. */
+/** "Dene" örneği: başlık ile nokta, soru, ünlem, üç nokta, virgül, noktalı virgül ve iki nokta içeren iki paragraf. */
 const PAUSE_SAMPLE: PageContent[] = [
   {
     page: 1,
     paragraphs: [
       { text: "BÖLÜM 1. FISILDAYAN AĞAÇLAR", heading: true },
       {
-        text: "Bir varmış, bir yokmuş. Ormanın en eski ağacı, gece olunca fısıldamaya başlarmış. Kimse ne dediğini anlayamazmış; yine de herkes dinlermiş."
+        text: "Bir varmış, bir yokmuş. Ormanın en eski ağacı, gece olunca fısıldamaya başlarmış; kimse ne dediğini anlayamazmış. Yine de herkes dinlermiş... sessizce, sabırla."
       },
-      { text: "Küçük kız bir gün ormana girdi. Rüzgâr durdu, yapraklar sustu: ağaç ilk kez ona seslendi." }
+      { text: "Küçük kız bir gün ormana girdi. Rüzgâr durdu! Ağaç ona seslendi: Kimsin sen? Kız bir süre düşündü… sonra gülümsedi." }
     ]
   }
 ];
@@ -103,12 +103,19 @@ export default function App() {
   const [pitch, setPitch] = useState(() => Number(readPref("ks.pitch", "1")) || 1);
   const [volume, setVolume] = useState(() => readNumberPref("ks.volume", 1, 0.1, 1));
   const [paraPause, setParaPause] = useState(() => readNumberPref("ks.paraPause", 0.4, 0, 2));
-  // Eski sürümdeki tek "başlık" ayarı (ks.headPause) varsa iki yeni ayarın başlangıç değeri olur.
+  // Eski sürümlerde tek "başlık" ayarı (ks.headPause) ve tek "cümle" ayarı (ks.sentPause) vardı; varsa yenilerin başlangıç değeri olur.
   const legacyHeadPause = readNumberPref("ks.headPause", 0.8, 0, 3);
+  const legacySentPause = readNumberPref("ks.sentPause", 0, 0, 1.5);
+  const legacyCommaPause = readNumberPref("ks.commaPause", 0, 0, 1);
   const [headBefore, setHeadBefore] = useState(() => readNumberPref("ks.headBefore", legacyHeadPause, 0, 3));
   const [headAfter, setHeadAfter] = useState(() => readNumberPref("ks.headAfter", legacyHeadPause, 0, 3));
-  const [sentPause, setSentPause] = useState(() => readNumberPref("ks.sentPause", 0, 0, 1.5));
-  const [commaPause, setCommaPause] = useState(() => readNumberPref("ks.commaPause", 0, 0, 1));
+  const [periodPause, setPeriodPause] = useState(() => readNumberPref("ks.periodPause", legacySentPause, 0, 1.5));
+  const [questionPause, setQuestionPause] = useState(() => readNumberPref("ks.questionPause", legacySentPause, 0, 1.5));
+  const [ellipsisPause, setEllipsisPause] = useState(() => readNumberPref("ks.ellipsisPause", legacySentPause, 0, 2));
+  const [commaPause, setCommaPause] = useState(legacyCommaPause);
+  const [semicolonPause, setSemicolonPause] = useState(() => readNumberPref("ks.semicolonPause", legacyCommaPause, 0, 1));
+  const [colonPause, setColonPause] = useState(() => readNumberPref("ks.colonPause", legacyCommaPause, 0, 1));
+  const [pauseOpen, setPauseOpen] = useState(false);
   const [lowerCaps, setLowerCaps] = useState(() => readPref("ks.lowerCaps", "1") !== "0");
   const [dict, setDict] = useState<Pronunciation[]>(() => parsePronunciations(readPref("ks.dict", "[]")));
   const [dictOpen, setDictOpen] = useState(false);
@@ -142,11 +149,15 @@ export default function App() {
       paragraphMs: Math.round(paraPause * 1000),
       headingBeforeMs: Math.round(headBefore * 1000),
       headingAfterMs: Math.round(headAfter * 1000),
-      sentenceMs: Math.round(sentPause * 1000),
+      periodMs: Math.round(periodPause * 1000),
+      questionMs: Math.round(questionPause * 1000),
+      ellipsisMs: Math.round(ellipsisPause * 1000),
       commaMs: Math.round(commaPause * 1000),
+      semicolonMs: Math.round(semicolonPause * 1000),
+      colonMs: Math.round(colonPause * 1000),
       lowerCaps
     }),
-    [paraPause, headBefore, headAfter, sentPause, commaPause, lowerCaps]
+    [paraPause, headBefore, headAfter, periodPause, questionPause, ellipsisPause, commaPause, semicolonPause, colonPause, lowerCaps]
   );
   const contentHash = useMemo(
     () =>
@@ -206,8 +217,12 @@ export default function App() {
   useEffect(() => writePref("ks.paraPause", String(paraPause)), [paraPause]);
   useEffect(() => writePref("ks.headBefore", String(headBefore)), [headBefore]);
   useEffect(() => writePref("ks.headAfter", String(headAfter)), [headAfter]);
-  useEffect(() => writePref("ks.sentPause", String(sentPause)), [sentPause]);
+  useEffect(() => writePref("ks.periodPause", String(periodPause)), [periodPause]);
+  useEffect(() => writePref("ks.questionPause", String(questionPause)), [questionPause]);
+  useEffect(() => writePref("ks.ellipsisPause", String(ellipsisPause)), [ellipsisPause]);
   useEffect(() => writePref("ks.commaPause", String(commaPause)), [commaPause]);
+  useEffect(() => writePref("ks.semicolonPause", String(semicolonPause)), [semicolonPause]);
+  useEffect(() => writePref("ks.colonPause", String(colonPause)), [colonPause]);
   useEffect(() => writePref("ks.lowerCaps", lowerCaps ? "1" : "0"), [lowerCaps]);
   useEffect(() => writePref("ks.dict", JSON.stringify(dict)), [dict]);
 
@@ -412,7 +427,11 @@ export default function App() {
 
   const resetPauses = () => {
     setCommaPause(0);
-    setSentPause(0);
+    setSemicolonPause(0);
+    setColonPause(0);
+    setPeriodPause(0);
+    setQuestionPause(0);
+    setEllipsisPause(0);
     setParaPause(0.4);
     setHeadBefore(0.8);
     setHeadAfter(0.8);
@@ -582,13 +601,25 @@ export default function App() {
   const pageContent = pages?.find((p) => p.page === selectedPage);
   const noTurkish = tts?.ready && (tts.turkish !== "available" || tts.voices.length === 0);
 
-  const pauseFields = [
-    { id: "comma-pause", label: "Virgül, noktalı virgül, iki nokta", value: commaPause, set: setCommaPause, max: 1, step: 0.05 },
-    { id: "sentence-pause", label: "Cümleler arası (. ! ?)", value: sentPause, set: setSentPause, max: 1.5, step: 0.05 },
-    { id: "para-pause", label: "Paragraflar arası", value: paraPause, set: setParaPause, max: 2, step: 0.1 },
-    { id: "head-before", label: "Başlıktan önce", value: headBefore, set: setHeadBefore, max: 3, step: 0.1 },
-    { id: "head-after", label: "Başlıktan sonra (bölüme geçiş)", value: headAfter, set: setHeadAfter, max: 3, step: 0.1 }
+  const pauseFields: PauseField[] = [
+    { id: "comma-pause", group: "Noktalama", label: "Virgül ( , )", value: commaPause, set: setCommaPause, max: 1, step: 0.05 },
+    { id: "semicolon-pause", group: "Noktalama", label: "Noktalı virgül ( ; )", value: semicolonPause, set: setSemicolonPause, max: 1, step: 0.05 },
+    { id: "colon-pause", group: "Noktalama", label: "İki nokta ( : )", value: colonPause, set: setColonPause, max: 1, step: 0.05 },
+    {
+      id: "period-pause", group: "Noktalama", label: "Nokta ( . )", value: periodPause, set: setPeriodPause, max: 1.5, step: 0.05,
+      hint: "Bir cümlenin sonu ile sonrakinin başı aynı boşluktur. “Dr. Ahmet”, “19. yüzyıl”, “M. Kemal” gibi yerlerde bekleme konmaz."
+    },
+    { id: "question-pause", group: "Noktalama", label: "Soru ve ünlem ( ? ! )", value: questionPause, set: setQuestionPause, max: 1.5, step: 0.05 },
+    {
+      id: "ellipsis-pause", group: "Noktalama", label: "Üç nokta ( … )", value: ellipsisPause, set: setEllipsisPause, max: 2, step: 0.05,
+      hint: "Sonraki sözcük küçük harfle başlasa da (“Ben... bilmiyorum.”) bekler."
+    },
+    { id: "para-pause", group: "Yapı", label: "Paragraflar arası", value: paraPause, set: setParaPause, max: 2, step: 0.1 },
+    { id: "head-before", group: "Yapı", label: "Başlıktan önce", value: headBefore, set: setHeadBefore, max: 3, step: 0.1 },
+    { id: "head-after", group: "Yapı", label: "Başlıktan sonra (bölüme geçiş)", value: headAfter, set: setHeadAfter, max: 3, step: 0.1 }
   ];
+  const punctuationActive = pauseFields.filter((f) => f.group === "Noktalama" && f.value > 0).length;
+  const punctuationTotal = pauseFields.filter((f) => f.group === "Noktalama").length;
 
   return (
     <main className="app-shell">
@@ -704,18 +735,10 @@ export default function App() {
           </div>
 
           <div className="settings-card">
-            <div className="settings-title"><span>⋯</span><div><strong>Duraklamalar</strong><small>Robotik akışı kırmak için bekleme süreleri</small></div></div>
-            {pauseFields.map((f, i) => (
-              <div key={f.id} className={i === 0 ? "range-field flush" : "range-field"}>
-                <div><label htmlFor={f.id}>{f.label}</label><output>{seconds(f.value)}</output></div>
-                <input id={f.id} type="range" min="0" max={f.max} step={f.step} value={f.value} onChange={(e) => f.set(Number(e.target.value))} disabled={playing || !!exporting} />
-              </div>
-            ))}
-            <small className="field-hint">Bir cümlenin sonu ile sonrakinin başı aynı boşluktur, tek ayarla (“Cümleler arası”) belirlenir. Süreler ses motorunun kendi doğal beklemesinin üstüne eklenir ve konuşma hızından etkilenmez. Cümle ve virgül beklemesi açıkken ses dosyası oluşturma biraz daha uzun sürer.</small>
-            <div className="dict-actions">
-              <button type="button" className="secondary-button" disabled={!tts?.ready || !!exporting} onClick={() => void tryPauses()}>▶ Duraklamaları dene</button>
-              <button type="button" className="text-button" disabled={playing || !!exporting} onClick={resetPauses}>Varsayılana dön</button>
-            </div>
+            <div className="settings-title"><span>⋯</span><div><strong>Duraklamalar</strong><small>{punctuationActive ? `Noktalama: ${punctuationActive}/${punctuationTotal} açık` : "Noktalama beklemeleri kapalı"}</small></div></div>
+            <small className="field-hint flush-top">Robotik akışı kırmak için nokta, virgül, üç nokta, paragraf ve başlıklardan sonra bekleme süreleri.</small>
+            <button type="button" className="secondary-button dict-open" disabled={playing || !!exporting} onClick={() => setPauseOpen(true)}>Duraklamaları ayarla</button>
+            {(playing || !!exporting) && <small className="field-hint">Ayarlamak için önce seslendirmeyi duraklat.</small>}
           </div>
 
           <div className="settings-card">
@@ -802,6 +825,16 @@ export default function App() {
       )}
 
       <footer className="footer"><span className="brand-mark small">K</span><span>Bir hikâye, bir nefes.</span><span className="footer-lock">⌑ Verilerin cihazında</span></footer>
+
+      {pauseOpen && (
+        <PauseDialog
+          fields={pauseFields}
+          canTry={!!tts?.ready && !exporting}
+          onTry={() => void tryPauses()}
+          onReset={resetPauses}
+          onClose={() => { void pause(); setPauseOpen(false); }}
+        />
+      )}
 
       {dictOpen && (
         <PronunciationDialog
