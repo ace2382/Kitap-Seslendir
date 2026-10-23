@@ -20,6 +20,10 @@ export type Pronunciation = {
 };
 
 export type PauseSettings = { paragraphMs: number; headingMs: number };
+export type PlanSettings = PauseSettings & {
+  /** Tamamı büyük harfli başlık/kelime dizilerini normal harfe çevirir (motor harf harf heceleyemesin). */
+  lowerCaps?: boolean;
+};
 export type SpeechSegment = { text: string; pauseAfterMs: number };
 export type SpeechChunk = SpeechSegment[];
 
@@ -129,7 +133,6 @@ export function validatePronunciation(
   if (!key) return "“Yazılışı” boş olamaz.";
   if (key.length > MAX_FROM_LENGTH) return `“Yazılışı” en fazla ${MAX_FROM_LENGTH} karakter olabilir.`;
   if (to.length > MAX_TO_LENGTH) return `“Okunuşu” en fazla ${MAX_TO_LENGTH} karakter olabilir.`;
-  if (key === to.trim()) return "Yazılış ile okunuş aynı; değiştirecek bir şey yok.";
   const replacing = list.some((p) => p.id === editingId || foldKey(p.from) === foldKey(key));
   if (!replacing && list.length >= MAX_PRONUNCIATIONS) {
     return `En fazla ${MAX_PRONUNCIATIONS} kural eklenebilir. Kullanmadıklarını sil.`;
@@ -152,6 +155,32 @@ export function upsertPronunciation(list: Pronunciation[], entry: Pronunciation)
   }
   if (!placed) out.push(entry);
   return out;
+}
+
+// ------------------------------------------------------------------ büyük harfli yazılar
+
+const VOWEL = /[AEIİOÖUÜaeıioöuü]/u;
+const ROMAN = /^(?=[IVXLCDM])M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
+
+/** Sesli harfi olan kelimeyi Türkçe kurallarla küçültür; TBMM/PTT gibi sesli harfsizler ve Romen rakamları (XIV) kalır. */
+function lowerWord(word: string): string {
+  return VOWEL.test(word) && !ROMAN.test(word) ? word.toLocaleLowerCase("tr") : word;
+}
+
+/**
+ * Ses motorları tamamı büyük harfli kelimeleri kısaltma sanıp harf harf okur ("FISILDAYAN" → "F-I-S-I-…").
+ * Bu yüzden iki durumda kelimeler küçültülür:
+ *  1. Paragrafta hiç küçük harf yoksa (büyük harfli başlık/satır),
+ *  2. Yan yana iki ya da daha fazla büyük harfli kelime varsa ("FISILDAYAN AĞAÇLAR ORMANI Bir varmış…").
+ * Tek başına geçen büyük harfli kelimeler (NASA, ABD) olduğu gibi bırakılır; onlar için sözlük kullanılır.
+ * Sesli harfi olmayan kısaltmalar (TBMM, PTT, THY) her durumda harf harf okunmaya devam eder.
+ */
+export function normalizeCaps(text: string): string {
+  if (!/\p{Lu}/u.test(text)) return text;
+  if (!/\p{Ll}/u.test(text)) return text.replace(/\p{L}+/gu, lowerWord);
+  return text.replace(/(?<![\p{L}\p{N}])\p{Lu}{2,}(?:[\s'’-]+\p{Lu}{2,})+(?![\p{L}\p{N}])/gu, (run) =>
+    run.replace(/\p{L}+/gu, lowerWord)
+  );
 }
 
 // ------------------------------------------------------------------ duraklama planı
@@ -179,11 +208,13 @@ const clampMs = (ms: number) => (Number.isFinite(ms) ? Math.max(0, Math.min(MAX_
  * - Duraklaması 0 olan ardışık paragraflar tek parça metin olarak ("\n" ile) birleştirilir;
  *   yani 0 = eski davranış, gereksiz motor çağrısı yok.
  * - Telaffuz sözlüğü yalnızca burada, seslendirilecek metne uygulanır; ekrandaki metin değişmez.
+ *   Sözlükten sonra (isteğe bağlı) büyük harfli yazılar normalleştirilir; böylece "ABD" gibi
+ *   sözlük kuralları büyük harfli haliyle eşleşmeye devam eder.
  * - Parça sayısı ve sırası değişmez: ilerleme/ileri-geri indeksleri aynı kalır.
  */
 export function buildSpeechPlan(
   chunks: Chunk[],
-  settings: PauseSettings,
+  settings: PlanSettings,
   pronounce: (text: string) => string = (t) => t
 ): SpeechChunk[] {
   const pauses: PauseSettings = { paragraphMs: clampMs(settings.paragraphMs), headingMs: clampMs(settings.headingMs) };
@@ -202,7 +233,8 @@ export function buildSpeechPlan(
       const pause = next ? boundaryPause(seg, chunk.page, next.seg, next.page, pauses) : 0;
       lastPause = pause;
 
-      const text = pronounce(seg.text).trim();
+      const spoken = pronounce(seg.text);
+      const text = (settings.lowerCaps ? normalizeCaps(spoken) : spoken).trim();
       const prev = out[out.length - 1];
       if (!text) {
         // Sözlük kelimeyi tamamen silmiş olabilir; bekleme süresi önceki segmentte korunur.

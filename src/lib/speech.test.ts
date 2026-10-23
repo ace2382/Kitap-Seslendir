@@ -3,6 +3,7 @@ import {
   MAX_PRONUNCIATIONS,
   buildSpeechPlan,
   compilePronunciations,
+  normalizeCaps,
   parsePronunciations,
   upsertPronunciation,
   validatePronunciation
@@ -75,6 +76,10 @@ describe("compilePronunciations", () => {
     const f = compilePronunciations([entry("USD", "$& dolar")]);
     expect(f("5 USD")).toBe("5 $& dolar");
   });
+  it("yazılışı okunuşuyla aynı olan kural istisna olur (kısa kuralı engeller)", () => {
+    const f = compilePronunciations([entry("hale", "hâle"), entry("hale getir", "hale getir")]);
+    expect(f("Hale hale getir, Hale gelince hale")).toBe("hâle hale getir, hâle gelince hâle");
+  });
   it("boş okunuş kelimeyi siler", () => {
     expect(compilePronunciations([entry("www", "")])("www site")).toBe(" site");
   });
@@ -123,7 +128,7 @@ describe("parsePronunciations / upsert / validate", () => {
   it("doğrulama mesajları", () => {
     expect(validatePronunciation(" ", "x", [])).toContain("boş");
     expect(validatePronunciation("a".repeat(81), "x", [])).toContain("80");
-    expect(validatePronunciation("AB", "AB", [])).toContain("aynı");
+    expect(validatePronunciation("hale getir", "hale getir", [])).toBe(null); // istisna kuralı geçerli
     expect(validatePronunciation("AB", "a be", [])).toBe(null);
     const full = Array.from({ length: MAX_PRONUNCIATIONS }, (_, i) => entry(`k${i}`, "x"));
     expect(validatePronunciation("yeni", "y", full)).toContain(String(MAX_PRONUNCIATIONS));
@@ -226,5 +231,38 @@ describe("buildSpeechPlan", () => {
     const { chunks } = buildChunks(pages);
     expect(JSON.stringify(buildSpeechPlan(chunks, P))).toBe(JSON.stringify(buildSpeechPlan(chunks, P)));
     expect(JSON.stringify(buildSpeechPlan(chunks, P))).not.toBe(JSON.stringify(buildSpeechPlan(chunks, { ...P, paragraphMs: 500 })));
+  });
+});
+
+describe("normalizeCaps (büyük harfli yazıları heceleme)", () => {
+  it("tamamı büyük harfli başlığı Türkçe kurallarla küçültür", () => {
+    expect(normalizeCaps("FISILDAYAN AĞAÇLAR ORMANI")).toBe("fısıldayan ağaçlar ormanı");
+    expect(normalizeCaps("İSTANBUL'UN IŞIKLARI")).toBe("istanbul'un ışıkları");
+  });
+  it("sesli harfi olmayan kısaltmalar harf harf okunmaya devam eder", () => {
+    expect(normalizeCaps("TBMM TOPLANDI")).toBe("TBMM toplandı");
+    expect(normalizeCaps("PTT")).toBe("PTT");
+  });
+  it("Romen rakamlarını bozmaz", () => {
+    expect(normalizeCaps("BÖLÜM XIV")).toBe("bölüm XIV");
+    expect(normalizeCaps("III. ORMAN")).toBe("III. orman");
+  });
+  it("başlığı paragrafa yapışmış ardışık büyük harfli kelimeleri küçültür", () => {
+    expect(normalizeCaps("FISILDAYAN AĞAÇLAR ORMANI Bir varmış bir yokmuş.")).toBe("fısıldayan ağaçlar ormanı Bir varmış bir yokmuş.");
+  });
+  it("cümle içinde tek başına büyük harfli kelimeye dokunmaz", () => {
+    expect(normalizeCaps("Dün NASA ve ABD açıklama yaptı.")).toBe("Dün NASA ve ABD açıklama yaptı.");
+    expect(normalizeCaps("TBMM, ABD ile görüştü.")).toBe("TBMM, ABD ile görüştü.");
+  });
+  it("küçük harfli metni olduğu gibi bırakır", () => {
+    expect(normalizeCaps("Bir varmış bir yokmuş.")).toBe("Bir varmış bir yokmuş.");
+    expect(normalizeCaps("")).toBe("");
+  });
+  it("planda yalnızca açıkken uygulanır ve sözlükten sonra çalışır", () => {
+    const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: "FISILDAYAN AĞAÇLAR ORMANI", heading: true }, { text: "Bir varmış." }] }]);
+    expect(buildSpeechPlan(chunks, P)[0][0].text).toBe("FISILDAYAN AĞAÇLAR ORMANI");
+    expect(buildSpeechPlan(chunks, { ...P, lowerCaps: true })[0][0].text).toBe("fısıldayan ağaçlar ormanı");
+    const dict = compilePronunciations([entry("AĞAÇLAR", "AAĞAÇLAR", { matchCase: true })]);
+    expect(buildSpeechPlan(chunks, { ...P, lowerCaps: true }, dict)[0][0].text).toBe("fısıldayan aağaçlar ormanı");
   });
 });
