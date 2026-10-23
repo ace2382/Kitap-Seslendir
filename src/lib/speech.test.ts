@@ -8,7 +8,7 @@ import {
   upsertPronunciation,
   validatePronunciation
 } from "./speech.ts";
-import type { Pronunciation } from "./speech.ts";
+import type { PauseSettings, Pronunciation } from "./speech.ts";
 import { buildChunks } from "./text.ts";
 import type { PageContent } from "./text.ts";
 
@@ -21,7 +21,16 @@ const entry = (from: string, to: string, extra: Partial<Pronunciation> = {}): Pr
   ...extra
 });
 
-const P = { paragraphMs: 400, headingMs: 900 };
+/** Test kısayolu: paragraf ve başlık süreleri; cümle/virgül duraklaması varsayılan kapalı (eski davranış). */
+const S = (paragraphMs: number, headingMs: number, extra: Partial<PauseSettings> = {}): PauseSettings => ({
+  paragraphMs,
+  headingBeforeMs: headingMs,
+  headingAfterMs: headingMs,
+  sentenceMs: 0,
+  commaMs: 0,
+  ...extra
+});
+const P = S(400, 900);
 
 describe("compilePronunciations", () => {
   it("kural yoksa metni olduğu gibi bırakır", () => {
@@ -167,13 +176,13 @@ describe("buildSpeechPlan", () => {
   });
   it("duraklama 0 ise paragraflar tek metinde birleşir (eski davranış)", () => {
     const { chunks } = buildChunks(pages);
-    const plan = buildSpeechPlan(chunks, { paragraphMs: 0, headingMs: 0 });
+    const plan = buildSpeechPlan(chunks, S(0, 0));
     expect(plan[0]).toEqual([{ text: "BÖLÜM 1. Ormandaki Ev\nBir varmış bir yokmuş.\nİkinci paragraf burada.", pauseAfterMs: 0 }]);
     expect(plan.map((c) => c.map((s) => s.text).join("\n"))).toEqual(chunks.map((c) => c.text));
   });
   it("yalnızca başlık süresi 0 iken paragraf süresi korunur", () => {
     const { chunks } = buildChunks(pages);
-    const plan = buildSpeechPlan(chunks, { paragraphMs: 400, headingMs: 0 });
+    const plan = buildSpeechPlan(chunks, S(400, 0));
     expect(plan[0][0].text).toBe("BÖLÜM 1. Ormandaki Ev\nBir varmış bir yokmuş.");
     expect(plan[0][0].pauseAfterMs).toBe(400);
   });
@@ -223,7 +232,7 @@ describe("buildSpeechPlan", () => {
   });
   it("uç değerleri sınırlar", () => {
     const { chunks } = buildChunks(pages);
-    const plan = buildSpeechPlan(chunks, { paragraphMs: -5, headingMs: 999999 });
+    const plan = buildSpeechPlan(chunks, S(-5, 999999));
     expect(plan[0][0].pauseAfterMs).toBe(5000);
     expect(plan[0][1].pauseAfterMs).toBe(0);
   });
@@ -264,5 +273,112 @@ describe("normalizeCaps (büyük harfli yazıları heceleme)", () => {
     expect(buildSpeechPlan(chunks, { ...P, lowerCaps: true })[0][0].text).toBe("fısıldayan ağaçlar ormanı");
     const dict = compilePronunciations([entry("AĞAÇLAR", "AAĞAÇLAR", { matchCase: true })]);
     expect(buildSpeechPlan(chunks, { ...P, lowerCaps: true }, dict)[0][0].text).toBe("fısıldayan aağaçlar ormanı");
+  });
+});
+
+/** Tek paragraflık metinden plan üretir (kısayol). */
+const planOf = (text: string, settings: PauseSettings, heading = false) =>
+  buildSpeechPlan(buildChunks([{ page: 1, paragraphs: [{ text, heading }] }]).chunks, settings);
+const flat = (plan: ReturnType<typeof planOf>) => plan.flat().map((s) => [s.text, s.pauseAfterMs]);
+
+describe("buildSpeechPlan: cümle ve virgül duraklamaları", () => {
+  const SENT = S(600, 900, { sentenceMs: 300 });
+
+  it("cümleler arasına bekleme koyar, son cümleye paragraf/kitap sonu kuralı uygulanır", () => {
+    expect(flat(planOf("Birinci cümle. İkinci cümle! Üçüncü cümle?", SENT))).toEqual([
+      ["Birinci cümle.", 300],
+      ["İkinci cümle!", 300],
+      ["Üçüncü cümle?", 0]
+    ]);
+  });
+  it("virgül, noktalı virgül ve iki noktadan sonra ayrı bekleme koyar", () => {
+    const plan = planOf("Gelir, görür; anlar: yine de susar.", S(600, 900, { commaMs: 150 }));
+    expect(flat(plan)).toEqual([["Gelir,", 150], ["görür;", 150], ["anlar:", 150], ["yine de susar.", 0]]);
+  });
+  it("cümle ve virgül süreleri birlikte çalışır", () => {
+    const plan = planOf("Gelir, görür. Sonra gider.", S(600, 900, { sentenceMs: 400, commaMs: 100 }));
+    expect(flat(plan)).toEqual([["Gelir,", 100], ["görür.", 400], ["Sonra gider.", 0]]);
+  });
+  it("sayılar ve saatler virgül/iki noktada bölünmez", () => {
+    expect(flat(planOf("Fiyat 1,5 lira, saat 10:30 oldu.", S(0, 0, { commaMs: 100 })))).toEqual([
+      ["Fiyat 1,5 lira,", 100],
+      ["saat 10:30 oldu.", 0]
+    ]);
+  });
+  it("sıra sayısı, baş harf, kısaltma ve Romen sıra sayısından sonra bekleme koymaz", () => {
+    const text = "19. yüzyılda M. Kemal ile Dr. Ahmet ve II. Abdülhamit vb. şeyler konuşuldu. Sonra bitti.";
+    expect(flat(planOf(text, SENT))).toEqual([
+      ["19. yüzyılda M. Kemal ile Dr. Ahmet ve II. Abdülhamit vb. şeyler konuşuldu.", 300],
+      ["Sonra bitti.", 0]
+    ]);
+  });
+  it("dört haneli sayıdan sonra gelen nokta (yıl) cümle sonu olabilir", () => {
+    expect(flat(planOf("Bu iş 1990. Sonra her şey değişti.", SENT))).toEqual([["Bu iş 1990.", 300], ["Sonra her şey değişti.", 0]]);
+  });
+  it("küçük harfle süren konuşma etiketinden önce bekleme koymaz", () => {
+    expect(flat(planOf("— Gel buraya! dedi anne. Çocuk koştu.", SENT))).toEqual([
+      ["— Gel buraya! dedi anne.", 300],
+      ["Çocuk koştu.", 0]
+    ]);
+  });
+  it("kapanış tırnağı noktalamayla birlikte kalır", () => {
+    expect(flat(planOf("\"Hayır.\" Kapıyı kapattı.", SENT))).toEqual([["\"Hayır.\"", 300], ["Kapıyı kapattı.", 0]]);
+  });
+  it("üç nokta ve ?! tek sınır sayılır", () => {
+    expect(flat(planOf("Belki... Ya sonra?! Hayır.", SENT))).toEqual([["Belki...", 300], ["Ya sonra?!", 300], ["Hayır.", 0]]);
+  });
+  it("başlık cümle/virgül parçalarına bölünmez", () => {
+    const plan = planOf("Bölüm 1. Ormandaki Ev, Gece", S(600, 900, { sentenceMs: 300, commaMs: 100 }), true);
+    expect(flat(plan)).toEqual([["Bölüm 1. Ormandaki Ev, Gece", 0]]);
+  });
+  it("her ayar 0 iken eski davranış: paragraf içi cümleler tek metin", () => {
+    const plan = planOf("Bir. İki, üç.", S(0, 0));
+    expect(flat(plan)).toEqual([["Bir. İki, üç.", 0]]);
+  });
+  it("yalnızca cümle süresi 0 iken virgül süresi tek başına çalışır, cümleler birleşik kalır", () => {
+    expect(flat(planOf("Bir, iki. Üç, dört.", S(0, 0, { commaMs: 100 })))).toEqual([["Bir,", 100], ["iki. Üç,", 100], ["dört.", 0]]);
+  });
+  it("paragraf sınırında paragraf süresi, paragraf içinde cümle süresi uygulanır", () => {
+    const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: "A bir. A iki." }, { text: "B bir. B iki." }] }]);
+    expect(flat(buildSpeechPlan(chunks, S(700, 900, { sentenceMs: 200 })))).toEqual([
+      ["A bir.", 200],
+      ["A iki.", 700],
+      ["B bir.", 200],
+      ["B iki.", 0]
+    ]);
+  });
+  it("paragraf ortasındaki parça sınırında cümle süresi uygulanır", () => {
+    const long = Array.from({ length: 12 }, (_, i) => `Bu ${i}. cümledir ve oldukça uzun bir cümle olsun diye uzatıldı.`).join(" ");
+    const { chunks } = buildChunks([{ page: 1, paragraphs: [{ text: long }] }], 200);
+    expect(chunks.length).toBeGreaterThan(2);
+    const plan = buildSpeechPlan(chunks, S(600, 900, { sentenceMs: 250 }));
+    for (let i = 0; i < plan.length - 1; i++) expect(plan[i][plan[i].length - 1].pauseAfterMs).toBe(250);
+    expect(plan[plan.length - 1][plan[plan.length - 1].length - 1].pauseAfterMs).toBe(0);
+  });
+  it("başlıktan önce ve sonra ayrı süreler kullanılır", () => {
+    const { chunks } = buildChunks([
+      { page: 1, paragraphs: [{ text: "Önceki bölümün son paragrafı." }, { text: "BÖLÜM 2", heading: true }, { text: "Yeni bölümün ilk paragrafı." }] }
+    ]);
+    const plan = buildSpeechPlan(chunks, S(400, 0, { headingBeforeMs: 1500, headingAfterMs: 700 }));
+    expect(flat(plan)).toEqual([
+      ["Önceki bölümün son paragrafı.", 1500],
+      ["BÖLÜM 2", 700],
+      ["Yeni bölümün ilk paragrafı.", 0]
+    ]);
+  });
+  it("sözlük cümle bölmeden önce çalışır: 'Dr.' → 'doktor' hatalı bekleme üretmez", () => {
+    const f = compilePronunciations([entry("Dr.", "doktor")]);
+    const chunks = buildChunks([{ page: 1, paragraphs: [{ text: "Dr. Ahmet geldi. Sonra gitti." }] }]).chunks;
+    expect(flat(buildSpeechPlan(chunks, SENT, f))).toEqual([["doktor Ahmet geldi.", 300], ["Sonra gitti.", 0]]);
+  });
+  it("hiçbir metin kaybolmaz: parçalar birleşince özgün metni verir (rastgele girdi)", () => {
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    const bits = ["Bir", "iki,", "üç.", "Dört!", "beş?", "Dr.", "Ahmet", "19.", "yüzyıl", "M.", "Kemal", "dedi;", "\"Tamam.\"", "1,5", "10:30", "...", "—", "ışık:", "sonra"];
+    for (let n = 0; n < 300; n++) {
+      const text = Array.from({ length: 2 + Math.floor(rnd() * 30) }, () => bits[Math.floor(rnd() * bits.length)]).join(" ");
+      const out = flat(planOf(text, S(300, 300, { sentenceMs: 200, commaMs: 100 }))).map((x) => x[0]).join(" ");
+      expect(out.replace(/\s+/g, " ")).toBe(text.replace(/\s+/g, " ").trim());
+    }
   });
 });

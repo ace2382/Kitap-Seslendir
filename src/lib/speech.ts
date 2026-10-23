@@ -19,7 +19,19 @@ export type Pronunciation = {
   matchCase: boolean;
 };
 
-export type PauseSettings = { paragraphMs: number; headingMs: number };
+/** Bekleme süreleri (ms). Hepsi 0 ise plan eski davranışla aynıdır: paragraflar tek metin olarak okunur. */
+export type PauseSettings = {
+  /** Paragraflar arası. */
+  paragraphMs: number;
+  /** Bir başlıktan önce (önceki bölümün sonu ile başlık arası). */
+  headingBeforeMs: number;
+  /** Bir başlıktan sonra (bölümün ilk paragrafına geçmeden önce). */
+  headingAfterMs: number;
+  /** Cümleler arası (. ! ? …). Bir cümlenin sonu ile sonrakinin başı aynı boşluktur. */
+  sentenceMs: number;
+  /** Cümle içinde virgül, noktalı virgül ve iki noktadan sonra. */
+  commaMs: number;
+};
 export type PlanSettings = PauseSettings & {
   /** Tamamı büyük harfli başlık/kelime dizilerini normal harfe çevirir (motor harf harf heceleyemesin). */
   lowerCaps?: boolean;
@@ -193,21 +205,101 @@ function continuesAcrossPages(prev: string, next: string): boolean {
   return !SENTENCE_END.test(prev.trim()) && /^\p{Ll}/u.test(next.trim());
 }
 
+/** Noktası cümle sonu sayılmayan yaygın Türkçe kısaltmalar ("Dr. Ahmet", "vb. şeyler"). Küçük harfle, noktasız. */
+const ABBREVIATIONS = new Set([
+  "dr", "prof", "doç", "yrd", "av", "uzm", "öğr", "arş", "müh", "mim", "gen", "alb", "yzb", "ütğm", "tğm", "kd", "bnb",
+  "hz", "sn", "sa", "bkz", "krş", "vs", "vb", "vd", "örn", "yak", "age", "no", "tel", "mah", "cad", "sok", "apt", "bul",
+  "mr", "mrs", "ms", "st", "jr", "sr", "bşk", "ünv", "fak", "ort", "çvş"
+]);
+
+const isTerminator = (c: string) => c === "." || c === "!" || c === "?" || c === "…";
+const isCloser = (c: string) => c === '"' || c === "”" || c === "»" || c === "’" || c === "'" || c === ")" || c === "]";
+const isSpace = (c: string) => c === " " || c === "\n" || c === "\t" || c === "\u00A0";
+
+/**
+ * Terminatörden sonra yeni bir cümle başlıyor mu? Başlamıyorsa duraklama konmaz:
+ * - sonraki harf küçükse ("Gel! dedi.", "vb. şeyler"),
+ * - nokta bir sıra sayısından ("19. yüzyıl", "II. Abdülhamit"), baş harften ("M. Kemal") ya da kısaltmadan ("Dr. Ahmet") sonra geliyorsa.
+ * Şüphede duraklama konmaz: gereksiz bekleme, eksik bekleme­den daha rahatsız edicidir.
+ */
+function startsNewSentence(text: string, termStart: number, termEnd: number, next: number): boolean {
+  if (/\p{Ll}/u.test(text[next])) return false;
+  if (termEnd - termStart === 1 && text[termStart] === ".") {
+    const before = /([\p{L}\p{N}]+)$/u.exec(text.slice(Math.max(0, termStart - 24), termStart));
+    const word = before?.[1];
+    if (word) {
+      if (/^\p{N}+$/u.test(word) && word.length <= 3) return false; // sıra sayısı (yıllar ≥ 4 hane cümle sonu olabilir)
+      if (/^\p{Lu}$/u.test(word)) return false; // baş harf
+      if (ROMAN.test(word) && word.length <= 4) return false; // Romen sıra sayısı
+      if (ABBREVIATIONS.has(foldKey(word))) return false;
+    }
+  }
+  return true;
+}
+
+type Break = { at: number; kind: "sentence" | "clause" };
+
+/** Metindeki duraklama noktaları: `at` = parçanın bittiği konum (noktalama ve kapanış tırnağı dahil). */
+function findBreaks(text: string, sentences: boolean, clauses: boolean): Break[] {
+  const breaks: Break[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (isTerminator(c)) {
+      let j = i + 1;
+      while (j < text.length && isTerminator(text[j])) j++;
+      const termEnd = j;
+      while (j < text.length && isCloser(text[j])) j++;
+      if (sentences && j < text.length && isSpace(text[j])) {
+        let k = j;
+        while (k < text.length && isSpace(text[k])) k++;
+        if (k < text.length && startsNewSentence(text, i, termEnd, k)) breaks.push({ at: j, kind: "sentence" });
+      }
+      i = j - 1;
+    } else if (clauses && (c === "," || c === ";" || c === ":")) {
+      // "1,5" gibi sayılar ve "10:30" gibi saatler boşluksuz olduğu için bölünmez.
+      if (i + 1 < text.length && isSpace(text[i + 1]) && text.slice(i + 1).trim()) breaks.push({ at: i + 1, kind: "clause" });
+    }
+  }
+  return breaks;
+}
+
+/** Bir paragrafı cümle/virgül parçalarına böler; son parçanın `pause` değeri -1'dir (çağıran belirler). */
+function splitPieces(text: string, sentenceMs: number, commaMs: number): { text: string; pause: number }[] {
+  if (sentenceMs <= 0 && commaMs <= 0) return [{ text, pause: -1 }];
+  const pieces: { text: string; pause: number }[] = [];
+  let start = 0;
+  for (const b of findBreaks(text, sentenceMs > 0, commaMs > 0)) {
+    const piece = text.slice(start, b.at).trim();
+    if (piece) pieces.push({ text: piece, pause: b.kind === "sentence" ? sentenceMs : commaMs });
+    start = b.at;
+  }
+  const last = text.slice(start).trim();
+  if (last) pieces.push({ text: last, pause: -1 });
+  else if (pieces.length) pieces[pieces.length - 1].pause = -1;
+  return pieces;
+}
+
 function boundaryPause(a: Segment, aPage: number, b: Segment, bPage: number, s: PauseSettings): number {
-  if (!b.newParagraph) return 0; // aynı paragrafın devamı (uzun paragraf parçalara bölünmüş)
+  // Aynı paragrafın devamı: parça sınırları cümle sınırlarına denk gelir.
+  if (!b.newParagraph) return s.sentenceMs;
   if (aPage !== bPage && !a.heading && !b.heading && continuesAcrossPages(a.text, b.text)) return 0;
-  return a.heading || b.heading ? s.headingMs : s.paragraphMs;
+  if (a.heading) return s.headingAfterMs;
+  if (b.heading) return s.headingBeforeMs;
+  return s.paragraphMs;
 }
 
 const clampMs = (ms: number) => (Number.isFinite(ms) ? Math.max(0, Math.min(MAX_PAUSE_MS, Math.round(ms))) : 0);
 
 /**
  * Parçalardan seslendirme planını üretir.
- * - Duraklama paragraflar arasında `paragraphMs`, bir başlığın öncesinde ve sonrasında `headingMs`'dir.
- * - Parça sınırı paragrafın ortasına denk geliyorsa duraklama yoktur.
- * - Duraklaması 0 olan ardışık paragraflar tek parça metin olarak ("\n" ile) birleştirilir;
+ * - Paragraflar arası `paragraphMs`; başlıktan önce `headingBeforeMs`, sonra `headingAfterMs`.
+ * - `sentenceMs` / `commaMs` > 0 ise paragraflar cümlelere / virgül parçalarına bölünür ve aralarına bekleme konur.
+ *   Kısaltma ("Dr. Ahmet"), sıra sayısı ("19. yüzyıl"), baş harf ("M. Kemal") ve küçük harfle süren konuşma
+ *   etiketleri ("Gel! dedi.") cümle sonu sayılmaz. Başlıklar bölünmez.
+ * - Duraklaması 0 olan ardışık parçalar tek metin olarak birleştirilir (paragraflar "\n", cümleler " " ile);
  *   yani 0 = eski davranış, gereksiz motor çağrısı yok.
  * - Telaffuz sözlüğü yalnızca burada, seslendirilecek metne uygulanır; ekrandaki metin değişmez.
+ *   Sözlük cümle bölmeden ÖNCE çalışır: "Dr." → "doktor" gibi kurallar nokta kaynaklı hatalı bekleme de önler.
  *   Sözlükten sonra (isteğe bağlı) büyük harfli yazılar normalleştirilir; böylece "ABD" gibi
  *   sözlük kuralları büyük harfli haliyle eşleşmeye devam eder.
  * - Parça sayısı ve sırası değişmez: ilerleme/ileri-geri indeksleri aynı kalır.
@@ -217,13 +309,29 @@ export function buildSpeechPlan(
   settings: PlanSettings,
   pronounce: (text: string) => string = (t) => t
 ): SpeechChunk[] {
-  const pauses: PauseSettings = { paragraphMs: clampMs(settings.paragraphMs), headingMs: clampMs(settings.headingMs) };
+  const pauses: PauseSettings = {
+    paragraphMs: clampMs(settings.paragraphMs),
+    headingBeforeMs: clampMs(settings.headingBeforeMs),
+    headingAfterMs: clampMs(settings.headingAfterMs),
+    sentenceMs: clampMs(settings.sentenceMs),
+    commaMs: clampMs(settings.commaMs)
+  };
   const plan: SpeechChunk[] = [];
 
   for (let k = 0; k < chunks.length; k++) {
     const chunk = chunks[k];
     const out: SpeechSegment[] = [];
     let lastPause = 0;
+
+    const push = (text: string, pause: number, joiner: string) => {
+      const prev = out[out.length - 1];
+      if (prev && prev.pauseAfterMs === 0) {
+        prev.text += joiner + text;
+        prev.pauseAfterMs = pause;
+      } else {
+        out.push({ text, pauseAfterMs: pause });
+      }
+    };
 
     for (let j = 0; j < chunk.segments.length; j++) {
       const seg = chunk.segments[j];
@@ -235,18 +343,15 @@ export function buildSpeechPlan(
 
       const spoken = pronounce(seg.text);
       const text = (settings.lowerCaps ? normalizeCaps(spoken) : spoken).trim();
-      const prev = out[out.length - 1];
       if (!text) {
         // Sözlük kelimeyi tamamen silmiş olabilir; bekleme süresi önceki segmentte korunur.
+        const prev = out[out.length - 1];
         if (prev) prev.pauseAfterMs = Math.max(prev.pauseAfterMs, pause);
         continue;
       }
-      if (prev && prev.pauseAfterMs === 0) {
-        prev.text += "\n" + text;
-        prev.pauseAfterMs = pause;
-      } else {
-        out.push({ text, pauseAfterMs: pause });
-      }
+
+      const pieces = seg.heading ? [{ text, pause: -1 }] : splitPieces(text, pauses.sentenceMs, pauses.commaMs);
+      pieces.forEach((piece, n) => push(piece.text, piece.pause < 0 ? pause : piece.pause, n === 0 ? "\n" : " "));
     }
 
     // Boş parça kuyruğu bozmasın (yerel taraf da aynı hileyi kullanır).
