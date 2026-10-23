@@ -7,6 +7,7 @@ import PronunciationDialog from "./components/PronunciationDialog.tsx";
 import PdfPageView from "./components/PdfPageView.tsx";
 import { UserError, describeError } from "./lib/errors.ts";
 import { buildSpeechPlan, compilePronunciations, parsePronunciations } from "./lib/speech.ts";
+import type { SpeechChunk } from "./lib/speech.ts";
 import type { Pronunciation } from "./lib/speech.ts";
 import { buildChunks, estimateMinutes, fnv1a } from "./lib/text.ts";
 import type { PageContent } from "./lib/text.ts";
@@ -52,7 +53,21 @@ function readNumberPref(key: string, fallback: number, lo: number, hi: number): 
   const n = Number.parseFloat(readPref(key, ""));
   return Number.isFinite(n) ? clamp(n, lo, hi) : fallback;
 }
-const seconds = (n: number) => `${n.toFixed(1).replace(".", ",")} sn`;
+const seconds = (n: number) => (n <= 0 ? "Yok" : `${n.toFixed(2).replace(/0$/, "").replace(".", ",")} sn`);
+
+/** "Duraklamaları dene" örneği: başlık, virgül/noktalı virgül/iki nokta, cümleler ve iki paragraf içerir. */
+const PAUSE_SAMPLE: PageContent[] = [
+  {
+    page: 1,
+    paragraphs: [
+      { text: "BÖLÜM 1. FISILDAYAN AĞAÇLAR", heading: true },
+      {
+        text: "Bir varmış, bir yokmuş. Ormanın en eski ağacı, gece olunca fısıldamaya başlarmış. Kimse ne dediğini anlayamazmış; yine de herkes dinlermiş."
+      },
+      { text: "Küçük kız bir gün ormana girdi. Rüzgâr durdu, yapraklar sustu: ağaç ilk kez ona seslendi." }
+    ]
+  }
+];
 
 function writePref(key: string, value: string) {
   try {
@@ -88,7 +103,12 @@ export default function App() {
   const [pitch, setPitch] = useState(() => Number(readPref("ks.pitch", "1")) || 1);
   const [volume, setVolume] = useState(() => readNumberPref("ks.volume", 1, 0.1, 1));
   const [paraPause, setParaPause] = useState(() => readNumberPref("ks.paraPause", 0.4, 0, 2));
-  const [headPause, setHeadPause] = useState(() => readNumberPref("ks.headPause", 0.8, 0, 3));
+  // Eski sürümdeki tek "başlık" ayarı (ks.headPause) varsa iki yeni ayarın başlangıç değeri olur.
+  const legacyHeadPause = readNumberPref("ks.headPause", 0.8, 0, 3);
+  const [headBefore, setHeadBefore] = useState(() => readNumberPref("ks.headBefore", legacyHeadPause, 0, 3));
+  const [headAfter, setHeadAfter] = useState(() => readNumberPref("ks.headAfter", legacyHeadPause, 0, 3));
+  const [sentPause, setSentPause] = useState(() => readNumberPref("ks.sentPause", 0, 0, 1.5));
+  const [commaPause, setCommaPause] = useState(() => readNumberPref("ks.commaPause", 0, 0, 1));
   const [lowerCaps, setLowerCaps] = useState(() => readPref("ks.lowerCaps", "1") !== "0");
   const [dict, setDict] = useState<Pronunciation[]>(() => parsePronunciations(readPref("ks.dict", "[]")));
   const [dictOpen, setDictOpen] = useState(false);
@@ -112,22 +132,44 @@ export default function App() {
   bookRef.current = activeBook;
 
   const { chunks, sections } = useMemo(() => (pages ? buildChunks(pages) : { chunks: [], sections: [] }), [pages]);
-  // Seslendirme planı: parçalar aynı kalır; her parça paragraf metinlerine ve aralarındaki bekleme sürelerine ayrılır.
-  // Telaffuz sözlüğü yalnızca burada, seslendirilecek metne uygulanır (ekrandaki metin değişmez).
+  // Seslendirme planı: parçalar aynı kalır; her parça paragraf/cümle/virgül parçalarına ve aralarındaki bekleme
+  // sürelerine ayrılır. Telaffuz sözlüğü yalnızca burada, seslendirilecek metne uygulanır (ekrandaki metin değişmez).
+  // Plan büyük kitaplarda pahalıdır; kaydırıcı oynarken her seferinde kurulmasın diye yalnızca oynatma/ses dosyası
+  // oluşturma anında kurulur ve aynı girdiler için önbellekten gelir. İmza ise planın kendisinden değil girdilerinden hesaplanır.
   const pronounce = useMemo(() => compilePronunciations(dict), [dict]);
-  const plan = useMemo(
-    () =>
-      buildSpeechPlan(
-        chunks,
-        { paragraphMs: Math.round(paraPause * 1000), headingMs: Math.round(headPause * 1000), lowerCaps },
-        pronounce
-      ),
-    [chunks, paraPause, headPause, lowerCaps, pronounce]
+  const pauseSettings = useMemo(
+    () => ({
+      paragraphMs: Math.round(paraPause * 1000),
+      headingBeforeMs: Math.round(headBefore * 1000),
+      headingAfterMs: Math.round(headAfter * 1000),
+      sentenceMs: Math.round(sentPause * 1000),
+      commaMs: Math.round(commaPause * 1000),
+      lowerCaps
+    }),
+    [paraPause, headBefore, headAfter, sentPause, commaPause, lowerCaps]
   );
-  // Ses dosyası önbellek imzası: ses, hız, perde, seviye ve plan (metin + duraklamalar + sözlük etkisi).
+  const contentHash = useMemo(
+    () =>
+      fnv1a(
+        chunks
+          .map((c) => `${c.page}\u0002${c.segments.map((g) => `${g.heading ? 1 : 0}${g.newParagraph ? 1 : 0}${g.text}`).join("\u0003")}`)
+          .join("\u0001")
+      ),
+    [chunks]
+  );
+  const dictHash = useMemo(() => fnv1a(JSON.stringify(dict)), [dict]);
+  const planKey = `${contentHash}|${JSON.stringify(pauseSettings)}|${dictHash}`;
+  const planCache = useRef<{ key: string; plan: SpeechChunk[] } | null>(null);
+  const getPlan = useCallback((): SpeechChunk[] => {
+    if (planCache.current?.key === planKey) return planCache.current.plan;
+    const built = buildSpeechPlan(chunks, pauseSettings, pronounce);
+    planCache.current = { key: planKey, plan: built };
+    return built;
+  }, [planKey, chunks, pauseSettings, pronounce]);
+  // Ses dosyası önbellek imzası: ses, hız, perde, seviye ve plan girdileri (metin + duraklamalar + sözlük).
   const signature = useMemo(
-    () => fnv1a(`${voiceName}|${rate}|${pitch}|${volume}|${fnv1a(JSON.stringify(plan))}`),
-    [voiceName, rate, pitch, volume, plan]
+    () => fnv1a(`${voiceName}|${rate}|${pitch}|${volume}|${planKey}`),
+    [voiceName, rate, pitch, volume, planKey]
   );
   const selectedVoice = tts?.voices.find((v) => v.name === voiceName);
   const currentChunk = chunks[current];
@@ -162,7 +204,10 @@ export default function App() {
   useEffect(() => writePref("ks.pitch", String(pitch)), [pitch]);
   useEffect(() => writePref("ks.volume", String(volume)), [volume]);
   useEffect(() => writePref("ks.paraPause", String(paraPause)), [paraPause]);
-  useEffect(() => writePref("ks.headPause", String(headPause)), [headPause]);
+  useEffect(() => writePref("ks.headBefore", String(headBefore)), [headBefore]);
+  useEffect(() => writePref("ks.headAfter", String(headAfter)), [headAfter]);
+  useEffect(() => writePref("ks.sentPause", String(sentPause)), [sentPause]);
+  useEffect(() => writePref("ks.commaPause", String(commaPause)), [commaPause]);
   useEffect(() => writePref("ks.lowerCaps", lowerCaps ? "1" : "0"), [lowerCaps]);
   useEffect(() => writePref("ks.dict", JSON.stringify(dict)), [dict]);
 
@@ -279,16 +324,17 @@ export default function App() {
   const startPlayback = useCallback(
     async (index: number) => {
       const book = bookRef.current;
-      if (!book || !plan.length) return;
+      if (!book || !chunks.length) return;
       if (tts && !tts.ready) {
         setError("Android metin okuma motoru hazır değil. Ses ayarlarından bir motor seçip tekrar dene.");
         return;
       }
-      const start = clamp(index, 0, plan.length - 1);
+      const start = clamp(index, 0, chunks.length - 1);
       setError("");
       setPlaying(true);
       setCurrent(start);
       try {
+        const plan = getPlan();
         await play(
           { plan, startIndex: start, rate, pitch, volume, voiceName: voiceName || undefined, title: book.name },
           handlers
@@ -299,7 +345,7 @@ export default function App() {
         setError(describeError(e, "Seslendirme başlatılamadı."));
       }
     },
-    [plan, tts, rate, pitch, volume, voiceName, handlers, persistProgress]
+    [chunks, getPlan, tts, rate, pitch, volume, voiceName, handlers, persistProgress]
   );
 
   const pause = useCallback(async () => {
@@ -337,13 +383,13 @@ export default function App() {
     void startPlayback(index);
   };
 
-  const speakPreview = async (text: string, title: string) => {
+  const speakPlan = async (plan: SpeechChunk[], title: string) => {
     await pause();
     setError("");
     try {
       await play(
         {
-          plan: [[{ text, pauseAfterMs: 0 }]],
+          plan,
           startIndex: 0,
           rate,
           pitch,
@@ -356,6 +402,20 @@ export default function App() {
     } catch (e) {
       setError(describeError(e, "Ses denemesi başlatılamadı."));
     }
+  };
+
+  const speakPreview = (text: string, title: string) => speakPlan([[{ text, pauseAfterMs: 0 }]], title);
+
+  // Duraklama ayarlarını gerçek kitaptan bağımsız, kısa bir örnekle (şu anki sözlük ve ayarlarla) kulakla dener.
+  const tryPauses = () =>
+    speakPlan(buildSpeechPlan(buildChunks(PAUSE_SAMPLE).chunks, pauseSettings, pronounce), "Duraklama denemesi");
+
+  const resetPauses = () => {
+    setCommaPause(0);
+    setSentPause(0);
+    setParaPause(0.4);
+    setHeadBefore(0.8);
+    setHeadAfter(0.8);
   };
 
   const trySample = () => speakPreview("Merhaba! Ben senin hikâyeni okuyacağım. Bu sesi beğendin mi?", "Ses denemesi");
@@ -449,11 +509,12 @@ export default function App() {
 
   const makeAudio = async () => {
     const book = bookRef.current;
-    if (!book || !plan.length) return;
+    if (!book || !chunks.length) return;
     await pause();
     setError("");
-    setExporting({ done: 0, total: plan.length });
+    setExporting({ done: 0, total: chunks.length });
     try {
+      const plan = getPlan();
       const result = await exportAudio(
         { bookId: book.id, title: book.name, signature, plan, rate, pitch, volume, voiceName: voiceName || undefined },
         (done, total) => setExporting({ done, total })
@@ -520,6 +581,14 @@ export default function App() {
 
   const pageContent = pages?.find((p) => p.page === selectedPage);
   const noTurkish = tts?.ready && (tts.turkish !== "available" || tts.voices.length === 0);
+
+  const pauseFields = [
+    { id: "comma-pause", label: "Virgül, noktalı virgül, iki nokta", value: commaPause, set: setCommaPause, max: 1, step: 0.05 },
+    { id: "sentence-pause", label: "Cümleler arası (. ! ?)", value: sentPause, set: setSentPause, max: 1.5, step: 0.05 },
+    { id: "para-pause", label: "Paragraflar arası", value: paraPause, set: setParaPause, max: 2, step: 0.1 },
+    { id: "head-before", label: "Başlıktan önce", value: headBefore, set: setHeadBefore, max: 3, step: 0.1 },
+    { id: "head-after", label: "Başlıktan sonra (bölüme geçiş)", value: headAfter, set: setHeadAfter, max: 3, step: 0.1 }
+  ];
 
   return (
     <main className="app-shell">
@@ -635,9 +704,18 @@ export default function App() {
           </div>
 
           <div className="settings-card">
-            <div className="settings-title"><span>⋯</span><div><strong>Duraklamalar</strong><small>Paragraf ve başlıklar arasındaki bekleme</small></div></div>
-            <div className="range-field flush"><div><label htmlFor="para-pause">Paragraflar arası</label><output>{seconds(paraPause)}</output></div><input id="para-pause" type="range" min="0" max="2" step="0.1" value={paraPause} onChange={(e) => setParaPause(Number(e.target.value))} disabled={playing || !!exporting} /><div className="range-ends"><span>Bitişik</span><span>Uzun</span></div></div>
-            <div className="range-field"><div><label htmlFor="head-pause">Başlığın öncesi ve sonrası</label><output>{seconds(headPause)}</output></div><input id="head-pause" type="range" min="0" max="3" step="0.1" value={headPause} onChange={(e) => setHeadPause(Number(e.target.value))} disabled={playing || !!exporting} /><div className="range-ends"><span>Bitişik</span><span>Uzun</span></div><small className="field-hint">Cümle sonlarındaki doğal bekleme ses motoruna aittir; buradaki süre onun üstüne eklenir.</small></div>
+            <div className="settings-title"><span>⋯</span><div><strong>Duraklamalar</strong><small>Robotik akışı kırmak için bekleme süreleri</small></div></div>
+            {pauseFields.map((f, i) => (
+              <div key={f.id} className={i === 0 ? "range-field flush" : "range-field"}>
+                <div><label htmlFor={f.id}>{f.label}</label><output>{seconds(f.value)}</output></div>
+                <input id={f.id} type="range" min="0" max={f.max} step={f.step} value={f.value} onChange={(e) => f.set(Number(e.target.value))} disabled={playing || !!exporting} />
+              </div>
+            ))}
+            <small className="field-hint">Bir cümlenin sonu ile sonrakinin başı aynı boşluktur, tek ayarla (“Cümleler arası”) belirlenir. Süreler ses motorunun kendi doğal beklemesinin üstüne eklenir ve konuşma hızından etkilenmez. Cümle ve virgül beklemesi açıkken ses dosyası oluşturma biraz daha uzun sürer.</small>
+            <div className="dict-actions">
+              <button type="button" className="secondary-button" disabled={!tts?.ready || !!exporting} onClick={() => void tryPauses()}>▶ Duraklamaları dene</button>
+              <button type="button" className="text-button" disabled={playing || !!exporting} onClick={resetPauses}>Varsayılana dön</button>
+            </div>
           </div>
 
           <div className="settings-card">
