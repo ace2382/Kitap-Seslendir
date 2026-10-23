@@ -3,15 +3,10 @@ import { Capacitor } from "@capacitor/core";
 import { Share } from "@capacitor/share";
 import type { PDFDocumentProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 import PasswordDialog from "./components/PasswordDialog.tsx";
+import PronunciationDialog from "./components/PronunciationDialog.tsx";
 import PdfPageView from "./components/PdfPageView.tsx";
 import { UserError, describeError } from "./lib/errors.ts";
-import {
-  buildSpeechPlan,
-  compilePronunciations,
-  parsePronunciations,
-  upsertPronunciation,
-  validatePronunciation
-} from "./lib/speech.ts";
+import { buildSpeechPlan, compilePronunciations, parsePronunciations } from "./lib/speech.ts";
 import type { Pronunciation } from "./lib/speech.ts";
 import { buildChunks, estimateMinutes, fnv1a } from "./lib/text.ts";
 import type { PageContent } from "./lib/text.ts";
@@ -94,10 +89,9 @@ export default function App() {
   const [volume, setVolume] = useState(() => readNumberPref("ks.volume", 1, 0.1, 1));
   const [paraPause, setParaPause] = useState(() => readNumberPref("ks.paraPause", 0.4, 0, 2));
   const [headPause, setHeadPause] = useState(() => readNumberPref("ks.headPause", 0.8, 0, 3));
+  const [lowerCaps, setLowerCaps] = useState(() => readPref("ks.lowerCaps", "1") !== "0");
   const [dict, setDict] = useState<Pronunciation[]>(() => parsePronunciations(readPref("ks.dict", "[]")));
-  const [draft, setDraft] = useState({ from: "", to: "", wholeWord: true, matchCase: false });
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [dictError, setDictError] = useState("");
+  const [dictOpen, setDictOpen] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
   const [selectedPage, setSelectedPage] = useState(1);
@@ -125,10 +119,10 @@ export default function App() {
     () =>
       buildSpeechPlan(
         chunks,
-        { paragraphMs: Math.round(paraPause * 1000), headingMs: Math.round(headPause * 1000) },
+        { paragraphMs: Math.round(paraPause * 1000), headingMs: Math.round(headPause * 1000), lowerCaps },
         pronounce
       ),
-    [chunks, paraPause, headPause, pronounce]
+    [chunks, paraPause, headPause, lowerCaps, pronounce]
   );
   // Ses dosyası önbellek imzası: ses, hız, perde, seviye ve plan (metin + duraklamalar + sözlük etkisi).
   const signature = useMemo(
@@ -169,6 +163,7 @@ export default function App() {
   useEffect(() => writePref("ks.volume", String(volume)), [volume]);
   useEffect(() => writePref("ks.paraPause", String(paraPause)), [paraPause]);
   useEffect(() => writePref("ks.headPause", String(headPause)), [headPause]);
+  useEffect(() => writePref("ks.lowerCaps", lowerCaps ? "1" : "0"), [lowerCaps]);
   useEffect(() => writePref("ks.dict", JSON.stringify(dict)), [dict]);
 
   useEffect(() => {
@@ -364,42 +359,6 @@ export default function App() {
   };
 
   const trySample = () => speakPreview("Merhaba! Ben senin hikâyeni okuyacağım. Bu sesi beğendin mi?", "Ses denemesi");
-
-  // ---------------------------------------------------------------- telaffuz sözlüğü
-
-  const resetDraft = () => {
-    setDraft({ from: "", to: "", wholeWord: true, matchCase: false });
-    setEditingId(null);
-    setDictError("");
-  };
-
-  const saveDraft = () => {
-    const problem = validatePronunciation(draft.from, draft.to, dict, editingId);
-    if (problem) {
-      setDictError(problem); // form sayfanın aşağısında; uyarı üstteki bannerda değil, formun yanında gösterilir
-      return;
-    }
-    const entry: Pronunciation = {
-      id: editingId ?? uid(),
-      from: draft.from.replace(/\s+/g, " ").trim(),
-      to: draft.to.trim(),
-      wholeWord: draft.wholeWord,
-      matchCase: draft.matchCase
-    };
-    setDict((list) => upsertPronunciation(list, entry));
-    resetDraft();
-  };
-
-  const editRule = (rule: Pronunciation) => {
-    setDraft({ from: rule.from, to: rule.to, wholeWord: rule.wholeWord, matchCase: rule.matchCase });
-    setEditingId(rule.id);
-    setDictError("");
-  };
-
-  const removeRule = (rule: Pronunciation) => {
-    setDict((list) => list.filter((r) => r.id !== rule.id));
-    if (editingId === rule.id) resetDraft();
-  };
 
   // ---------------------------------------------------------------- kitaplık
 
@@ -683,41 +642,10 @@ export default function App() {
 
           <div className="settings-card">
             <div className="settings-title"><span>Aa</span><div><strong>Telaffuz sözlüğü</strong><small>{dict.length ? `${dict.length} kural` : "Yanlış okunan kelimeleri düzelt"}</small></div></div>
-            {(playing || !!exporting) && <div className="voice-warning flush-top">Kuralları değiştirmek için önce seslendirmeyi duraklat.</div>}
-            <fieldset className="plain-fieldset" disabled={playing || !!exporting}>
-              <form className="dict-form" onSubmit={(e) => { e.preventDefault(); saveDraft(); }}>
-                <label className="field-label" htmlFor="dict-from">Metindeki yazılışı</label>
-                <input id="dict-from" className="text-input" value={draft.from} placeholder="ör. TBMM" maxLength={80} autoCapitalize="off" autoCorrect="off" spellCheck={false} onChange={(e) => { setDictError(""); setDraft((d) => ({ ...d, from: e.target.value })); }} />
-                <label className="field-label spaced" htmlFor="dict-to">Okunuşu</label>
-                <input id="dict-to" className="text-input" value={draft.to} placeholder="ör. te be em em" maxLength={200} autoCapitalize="off" autoCorrect="off" spellCheck={false} onChange={(e) => { setDictError(""); setDraft((d) => ({ ...d, to: e.target.value })); }} />
-                <label className="check-row"><input type="checkbox" checked={draft.wholeWord} onChange={(e) => setDraft((d) => ({ ...d, wholeWord: e.target.checked }))} /><span>Tam kelime olarak eşleş</span></label>
-                <label className="check-row"><input type="checkbox" checked={draft.matchCase} onChange={(e) => setDraft((d) => ({ ...d, matchCase: e.target.checked }))} /><span>Büyük/küçük harfi ayırt et</span></label>
-                <small className="field-hint">Tam kelime açıkken “NASA’nın” gibi kesme işaretli ekler de eşleşir. “kitap” → “kitab” gibi ekli halleri de yakalamak için kapat. Okunuşu boş bırakırsan kelime okunmaz.</small>
-                {dictError && <div className="voice-warning" role="alert">{dictError}</div>}
-                <div className="dict-actions">
-                  <button type="submit" className="secondary-button">{editingId ? "Kuralı güncelle" : "Kural ekle"}</button>
-                  {editingId && <button type="button" className="text-button" onClick={resetDraft}>Vazgeç</button>}
-                </div>
-              </form>
-              {dict.length > 0 && (
-                <ul className="dict-list">
-                  {dict.map((rule) => (
-                    <li key={rule.id} className={editingId === rule.id ? "editing" : undefined}>
-                      <div className="dict-pair">
-                        <span><b>{rule.from}</b> → {rule.to || "(okunmaz)"}</span>
-                        {(!rule.wholeWord || rule.matchCase) && <small>{[!rule.wholeWord && "kelime içinde de", rule.matchCase && "harf duyarlı"].filter(Boolean).join(", ")}</small>}
-                      </div>
-                      <div className="dict-row-actions">
-                        <button type="button" className="text-button" aria-label={`“${rule.from}” okunuşunu dinle`} disabled={!tts?.ready || !rule.to} onClick={() => void speakPreview(rule.to, "Telaffuz denemesi")}>Dinle</button>
-                        <button type="button" className="text-button" aria-label={`“${rule.from}” kuralını düzenle`} onClick={() => editRule(rule)}>Düzenle</button>
-                        <button type="button" className="danger-text" aria-label={`“${rule.from}” kuralını sil`} onClick={() => removeRule(rule)}>Sil</button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </fieldset>
-            <p className="audio-note">Kurallar yalnızca seslendirmede uygulanır, sayfa metni değişmez. Sonraki oynatmadan ve yeni oluşturulacak ses dosyalarından itibaren geçerli olur. Sözlük tüm kitaplar için ortaktır.</p>
+            <label className="check-row first"><input type="checkbox" checked={lowerCaps} disabled={playing || !!exporting} onChange={(e) => setLowerCaps(e.target.checked)} /><span>BÜYÜK HARFLİ başlıkları normal oku</span></label>
+            <small className="field-hint">“FISILDAYAN AĞAÇLAR ORMANI” gibi satırlar harf harf değil, kelime olarak okunur. TBMM, PTT gibi sesli harfsiz kısaltmalar harf harf okunmaya devam eder.</small>
+            <button type="button" className="secondary-button dict-open" disabled={playing || !!exporting} onClick={() => setDictOpen(true)}>{dict.length ? "Kuralları yönet" : "Kural ekle"}</button>
+            {(playing || !!exporting) && <small className="field-hint">Kuralları değiştirmek için önce seslendirmeyi duraklat.</small>}
           </div>
 
           <div className="audio-card">
@@ -796,6 +724,16 @@ export default function App() {
       )}
 
       <footer className="footer"><span className="brand-mark small">K</span><span>Bir hikâye, bir nefes.</span><span className="footer-lock">⌑ Verilerin cihazında</span></footer>
+
+      {dictOpen && (
+        <PronunciationDialog
+          rules={dict}
+          onChange={setDict}
+          onPreview={(text) => void speakPreview(text, "Telaffuz denemesi")}
+          canPreview={!!tts?.ready && !exporting}
+          onClose={() => setDictOpen(false)}
+        />
+      )}
 
       {pwRequest && (
         <PasswordDialog
